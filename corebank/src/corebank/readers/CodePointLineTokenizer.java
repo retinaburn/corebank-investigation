@@ -1,4 +1,4 @@
-package corebank;
+package corebank.readers;
 
 import java.text.Normalizer;
 import java.util.Objects;

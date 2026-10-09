@@ -1,5 +1,8 @@
 package corebank;
 
+import corebank.readers.RelationshipFileReader;
+import corebank.readers.TransactionFileReader;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.io.TempDir;

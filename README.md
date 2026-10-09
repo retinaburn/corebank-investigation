@@ -34,7 +34,8 @@ jbang corebank/src/Core.java
 jbang corebank/tests/ReaderTests.java
 ```
 
-All four file readers are reusable components, not startup ingestion jobs.
+All four file readers and their support classes live in `corebank/src/corebank/readers/`
+(package `corebank.readers`). The readers are reusable components, not startup ingestion jobs.
 Create it with `CustomerFileReader.create(path)`, open it with a Spring Batch
 `ExecutionContext`, read until it returns null, and close it in a finally block.
 All readers use 19-position IDs and enforce values from 1 through Long.MAX_VALUE.

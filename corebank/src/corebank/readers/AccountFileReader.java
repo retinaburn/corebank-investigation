@@ -1,4 +1,4 @@
-package corebank;
+package corebank.readers;
 
 import java.nio.file.Path;
 import java.time.LocalDate;

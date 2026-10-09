@@ -3,7 +3,7 @@
 //DEPS org.postgresql:postgresql
 //DEPS org.liquibase:liquibase-core
 //DEPS org.springframework:spring-jdbc
-//SOURCES corebank/ingest/BatchIngestor.java
+//SOURCES corebank/ingest/BatchIngestor.java corebank/processing/BatchProcessor.java
 //SOURCES corebank/readers/RelationshipFileReader.java corebank/readers/TransactionFileReader.java
 //SOURCES corebank/readers/FileReaderSupport.java corebank/readers/AccountFileReader.java
 //DEPS org.springframework.boot:spring-boot-dependencies:3.4.4@pom
@@ -17,6 +17,7 @@
 //FILES db/changelog/001-schemas.sql=../../postgres/changelog/001-schemas.sql
 //FILES db/changelog/002-core-ingest.sql=../../postgres/changelog/002-core-ingest.sql
 //FILES db/changelog/003-core-operational.sql=../../postgres/changelog/003-core-operational.sql
+//FILES db/changelog/004-ingestion-receipt.sql=../../postgres/changelog/004-ingestion-receipt.sql
 
 import corebank.CoreApplication;
 

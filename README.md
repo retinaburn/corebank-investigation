@@ -4,7 +4,7 @@ A Java banking batch and Apache Camel integration learning project.
 
 ## Status
 
-Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation and operational posting remain to come.
+Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, and atomic balance updates are implemented.
 
 See [the design document](docs/banking-core-design.md) for agreed requirements and open decisions.
 
@@ -66,7 +66,7 @@ relationship_20261009.dat, and transaction_20261009.dat in data/input.
 Override the directory with `--corebank.input-directory=/path/to/input`.
 All four files must exist; empty files are accepted. Publish complete files before
 running and do not modify them during ingestion. The command exits after loading.
-Liquibase runs automatically before ingestion. Running without `--ingest` connects
+Liquibase runs automatically before ingestion. Running without `--ingest` or `--process` connects
 to PostgreSQL, applies pending migrations, and exits without loading files.
 See [database migration setup](postgres/README.md#liquibase-migrations).
 
@@ -78,6 +78,62 @@ JDBC inserts execute in groups of 500 within one transaction.
 Duplicate business keys are retained for future validation, not silently overwritten.
 This command only stages data: trigger-file watching, cross-record validation,
 core-table updates, balance posting, and output generation remain future steps.
+
+### Process a staged batch
+
+From the repository root, with the database environment configured as above:
+
+```sh
+jbang corebank/src/Core.java --ingest=2026-10-09
+jbang corebank/src/Core.java --process=2026-10-09
+```
+
+Run ingestion and processing as separate commands. Processing validates the date's
+staging records, upserts customers/accounts/relationships, inserts new immutable
+transactions, and adds credits/subtracts debits from balances in integer cents.
+New accounts receive their zero balance from the existing database trigger.
+Omitted reference records remain unchanged; negative balances are allowed.
+
+All operational changes and successful batch completion commit together. On an
+error they roll back, and the attempt is recorded as FAILED with zero applied
+counts and a diagnostic. Correct the inputs, re-ingest, and retry a failed date.
+Duplicate business keys within a file fail the whole batch. Transaction IDs are
+globally unique: identical account/type/amount replays are skipped, even on later
+dates; conflicting contents fail. Corrections require a new reversing transaction.
+Any end date, or a start date after the batch date, prohibits new transactions.
+The final net balance must fit signed BIGINT cents; overflow fails the batch.
+
+A retry of a COMPLETED date returns its stored counts without applying changes.
+Re-ingesting a RUNNING or COMPLETED date is rejected. Process dates in ascending
+order; an unprocessed date earlier than the latest completed date is rejected.
+Counts include applied reference upserts and newly inserted transactions only.
+Processing is serialized across application instances and holds the same date
+lock as ingestion across attempt creation and posting. These locks coordinate
+application commands, not arbitrary manual SQL writers.
+
+Migration 004 adds a receipt written atomically with successful ingestion, including
+four empty files. **Re-ingest dates staged before this migration before processing
+for the first time.** Existing staging data is retained, but no receipt is inferred.
+Do not manually modify staging after ingestion.
+
+A process crash can leave a durable RUNNING attempt. New processing is then blocked
+pending operator investigation; automatic crash recovery is not implemented. Verify
+the original process/connection has ended and inspect the attempt before marking
+an abandoned RUNNING row FAILED with completed_at and an explanatory error_message.
+A COMPLETED attempt must never be changed to FAILED. Retry after recovery.
+Trigger watching, output snapshots, and balance-file generation remain future work.
+
+### Processing integration tests
+
+With the disposable test database and COREBANK_TEST_DB_* variables below:
+
+```sh
+jbang corebank/tests/ProcessingTests.java
+```
+
+This launcher migrates the database and runs 13 tests, including concurrent posting,
+replays, upserts, invalid batches, failed retries, empty ingestion, and overflow.
+**It truncates all operational and staging tables; use only a disposable database.**
 
 ### Database integration tests
 

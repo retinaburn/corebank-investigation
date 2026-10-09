@@ -12,4 +12,7 @@
     <changeSet id="003-core-operational" author="corebank">
         <sqlFile path="003-core-operational.sql" relativeToChangelogFile="true" splitStatements="false"/>
     </changeSet>
+    <changeSet id="004-ingestion-receipt" author="corebank">
+        <sqlFile path="004-ingestion-receipt.sql" relativeToChangelogFile="true"/>
+    </changeSet>
 </databaseChangeLog>

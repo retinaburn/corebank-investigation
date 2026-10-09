@@ -15,6 +15,7 @@
 //FILES db/changelog/001-schemas.sql=../../postgres/changelog/001-schemas.sql
 //FILES db/changelog/002-core-ingest.sql=../../postgres/changelog/002-core-ingest.sql
 //FILES db/changelog/003-core-operational.sql=../../postgres/changelog/003-core-operational.sql
+//FILES db/changelog/004-ingestion-receipt.sql=../../postgres/changelog/004-ingestion-receipt.sql
 
 import org.junit.platform.console.ConsoleLauncher;
 import liquibase.integration.spring.SpringLiquibase;

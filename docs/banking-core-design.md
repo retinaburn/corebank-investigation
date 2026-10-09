@@ -1,6 +1,6 @@
 # Corebank Investigation — Design
 
-Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, trigger watching, and posting remain to be implemented. Updated 2026-10-09.
+Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation and posting are implemented; trigger watching and output generation remain future work. Updated 2026-10-09.
 
 ## Purpose and scope
 
@@ -384,3 +384,33 @@ All output follows the NFC/code-point/UTF-8/LF contract; text/dates are left-ali
 with spaces on the right, and numbers are right-aligned.
 Generation validates records through integration tests with existing readers.
 It emits no trigger and performs no migrations or database writes.
+
+## Core processing — implemented 2026-10-09
+
+This section supersedes earlier statements that validation/posting are unimplemented.
+BatchProcessor, invoked with --process=YYYY-MM-DD, validates staged business keys
+and references, upserts customers/accounts/relationships, inserts new transactions,
+and updates balances using CR as addition and DR as subtraction. Transactions are
+immutable: existing IDs with identical account/type/amount are no-ops regardless of
+incoming batch date; differing contents fail. Duplicate keys within staging fail.
+Reference omissions do not delete operational rows. New transaction accounts must
+have no end date and must start on or before the batch date. Negative balances and
+zero amounts are allowed. Numeric aggregation checks the final signed BIGINT balance
+without overflowing intermediate totals. The account trigger initializes balances.
+
+A committed RUNNING attempt precedes the operational transaction. All upserts,
+transaction inserts, balances, applied counts, and COMPLETED status commit together.
+Errors roll back and mark the attempt FAILED separately. Failed counts stay zero.
+Completed-date retries return original counts without posting; completed dates
+cannot be re-ingested. Failed dates may be corrected/re-ingested/retried. Unprocessed
+dates older than the latest completed date are rejected to prevent stale upserts.
+A stale RUNNING attempt blocks new processing until operator investigation/recovery.
+Automatic crash recovery and completed-date correction remain deferred.
+
+A global session advisory lock serializes processors. A session date lock shares
+the ingestor's transaction-lock namespace and persists across attempt commits,
+preventing concurrent staging replacement. These locks require cooperating writers.
+Migration 004 records successful ingestion atomically, including all-empty batches.
+Pre-migration staging is preserved but must be re-ingested to receive a receipt.
+ProcessingTests.java runs 13 PostgreSQL integration tests against a disposable DB.
+Output snapshots/files and trigger watching remain separate future steps.

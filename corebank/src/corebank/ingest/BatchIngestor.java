@@ -44,6 +44,12 @@ public final class BatchIngestor {
                 lock.setInt(2, Math.toIntExact(date.toEpochDay()));
                 lock.execute();
             }
+            try (var status = connection.prepareStatement("SELECT status FROM core.batch_run WHERE batch_date=? AND status IN ('RUNNING','COMPLETED')")) {
+                status.setObject(1, date);
+                try (var rows = status.executeQuery()) {
+                    if (rows.next()) throw new IllegalStateException("Cannot replace staging for " + rows.getString(1) + " batch " + date);
+                }
+            }
             Map<String, Long> counts = new LinkedHashMap<>();
             counts.put("customer", 
                 load(connection, date, input.resolve("customer" + suffix), "customer",
@@ -87,6 +93,10 @@ public final class BatchIngestor {
                         s.setString(6, r.type().name());
                         s.setLong(7, r.amount());
                     }));
+            try (var receipt = connection.prepareStatement("INSERT INTO core_ingest.batch_receipt(batch_date) VALUES (?) ON CONFLICT(batch_date) DO UPDATE SET ingested_at=clock_timestamp()")) {
+                receipt.setObject(1, date);
+                receipt.executeUpdate();
+            }
             connection.commit();
             return counts;
         } catch (Exception failure) {

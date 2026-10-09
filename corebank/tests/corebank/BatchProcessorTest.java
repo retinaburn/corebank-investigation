@@ -1,0 +1,163 @@
+package corebank;
+
+import corebank.processing.BatchProcessor;
+import corebank.ingest.BatchIngestor;
+import java.sql.*;
+import java.time.LocalDate;
+import java.nio.file.*;
+import java.util.concurrent.*;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
+import static org.junit.jupiter.api.Assertions.*;
+
+class BatchProcessorTest {
+    private Connection db;
+    private final LocalDate day = LocalDate.of(2026,10,9);
+    @TempDir Path input;
+    private Connection connect() throws SQLException {
+        return DriverManager.getConnection(System.getenv("COREBANK_TEST_DB_URL"),
+            System.getenv().getOrDefault("COREBANK_TEST_DB_USER","postgres"), System.getenv("COREBANK_TEST_DB_PASSWORD"));
+    }
+    @BeforeEach void setup() throws Exception { db=connect(); clean(); }
+    @AfterEach void close() throws Exception { if(db!=null) { clean(); db.close(); } }
+    private void clean() throws SQLException {
+        sql("TRUNCATE core.transaction,core.relationship,core.balance,core.account,core.customer,core.batch_run,core_ingest.customer,core_ingest.account,core_ingest.relationship,core_ingest.transaction,core_ingest.batch_receipt");
+    }
+    private void sql(String text) throws SQLException { try(var s=db.createStatement()) { s.execute(text); } }
+    private String value(String text) throws SQLException {
+        try(var s=db.createStatement();var rs=s.executeQuery(text)) { assertTrue(rs.next());return rs.getString(1); }
+    }
+    private void receipt(LocalDate d) throws SQLException { sql("INSERT INTO core_ingest.batch_receipt(batch_date) VALUES ('"+d+"')"); }
+    private void account(LocalDate d,long id) throws SQLException {
+        sql("INSERT INTO core_ingest.account VALUES ('"+d+"','account.dat',"+id+","+id+",'2026-01-01',NULL,'CHECKING')");
+    }
+    private void tx(LocalDate d,long line,long id,String type,long amount) throws SQLException {
+        sql("INSERT INTO core_ingest.transaction VALUES ('"+d+"','transaction.dat',"+line+","+id+",2,'"+type+"',"+amount+")");
+    }
+    private void fixture() throws SQLException {
+        receipt(day);account(day,2);
+        sql("INSERT INTO core_ingest.customer VALUES ('2026-10-09','customer.dat',1,1,'Jane','Doe','1 Main','Toronto','ON','A1A 1A1','Canada')");
+        sql("INSERT INTO core_ingest.relationship VALUES ('2026-10-09','relationship.dat',1,2,1,'PRIMARY')");
+    }
+    private java.util.Map<String,Long> process(LocalDate d) throws SQLException { return new BatchProcessor().process(db,d); }
+    @Test void postsAllTypesCreditsDebitsAndZeroBalances() throws Exception {
+        fixture();account(day,3);tx(day,1,10,"CR",100);tx(day,2,11,"DR",150);
+        var counts=process(day);
+        assertEquals(2L,counts.get("account"));assertEquals(2L,counts.get("transaction"));
+        assertEquals("-50",value("SELECT balance FROM core.balance WHERE account_id=2"));
+        assertEquals("0",value("SELECT balance FROM core.balance WHERE account_id=3"));
+        assertEquals("COMPLETED",value("SELECT status FROM core.batch_run"));
+        assertEquals("PRIMARY",value("SELECT type FROM core.relationship"));assertTrue(db.getAutoCommit());
+    }
+    @Test void completedRetryAndCrossDateReplayDoNotDoublePost() throws Exception {
+        fixture();tx(day,1,10,"CR",100);var first=process(day);assertEquals(first,process(day));
+        var next=day.plusDays(1);receipt(next);tx(next,1,10,"CR",100);tx(next,2,11,"DR",20);
+        assertEquals(1L,process(next).get("transaction"));
+        assertEquals("80",value("SELECT balance FROM core.balance WHERE account_id=2"));
+        assertEquals("2",value("SELECT count(*) FROM core.batch_run"));
+    }
+    @Test void upsertsReferencesWithoutResettingBalanceOrDeletingOmittedRows() throws Exception {
+        fixture();tx(day,1,10,"CR",100);process(day);
+        var next=day.plusDays(1);receipt(next);account(next,2);
+        sql("UPDATE core_ingest.account SET account_type='SAVINGS' WHERE batch_date='"+next+"'");
+        sql("INSERT INTO core_ingest.customer SELECT '"+next+"',source_file,source_line,customer_id,'Jo',last_name,address_line1,city,province,postal_code,country FROM core_ingest.customer");
+        sql("INSERT INTO core_ingest.relationship VALUES ('"+next+"','r.dat',1,2,1,'SECONDARY')");
+        process(next);
+        assertEquals("100",value("SELECT balance FROM core.balance WHERE account_id=2"));
+        assertEquals("SAVINGS",value("SELECT account_type FROM core.account"));
+        assertEquals("Jo",value("SELECT first_name FROM core.customer"));
+        assertEquals("SECONDARY",value("SELECT type FROM core.relationship"));
+        receipt(next.plusDays(1));process(next.plusDays(1));
+        assertEquals("1",value("SELECT count(*) FROM core.account"));
+    }
+    @Test void conflictingReplayFailsWholeBatchAndCanBeCorrectedAndRetried() throws Exception {
+        fixture();tx(day,1,10,"CR",100);process(day);
+        var next=day.plusDays(1);receipt(next);account(next,3);tx(next,1,10,"DR",100);
+        assertTrue(assertThrows(SQLException.class,()->process(next)).getMessage().contains("Conflicting transaction"));
+        assertEquals("1",value("SELECT count(*) FROM core.account"));
+        assertEquals("100",value("SELECT balance FROM core.balance WHERE account_id=2"));
+        assertEquals("0",value("SELECT account_count FROM core.batch_run WHERE status='FAILED'"));
+        sql("UPDATE core_ingest.transaction SET type='CR' WHERE batch_date='"+next+"'");
+        assertEquals(0L,process(next).get("transaction"));
+        assertEquals("2",value("SELECT count(*) FROM core.batch_run WHERE batch_date='"+next+"'"));
+    }
+    @Test void rejectsDuplicatesForEveryRecordType() throws Exception {
+        for(String table:new String[]{"customer","account","relationship","transaction"}) {
+            clean();fixture();tx(day,1,10,"CR",10);
+            String fields=switch(table) {
+                case "customer" -> "customer_id,first_name,last_name,address_line1,city,province,postal_code,country";
+                case "account" -> "account_id,start_date,end_date,account_type";
+                case "relationship" -> "account_id,customer_id,type";
+                default -> "transaction_id,account_id,type,amount";
+            };
+            sql("INSERT INTO core_ingest."+table+" SELECT batch_date,source_file,99,"+fields+" FROM core_ingest."+table);
+            assertTrue(assertThrows(SQLException.class,()->process(day)).getMessage().contains("Duplicate "+table));
+            assertEquals("0",value("SELECT count(*) FROM core.account"));
+        }
+    }
+    @Test void rejectsMissingReferencesAndInvalidDates() throws Exception {
+        fixture();sql("UPDATE core_ingest.relationship SET customer_id=999");
+        assertTrue(assertThrows(SQLException.class,()->process(day)).getMessage().contains("Missing customer"));
+        sql("UPDATE core_ingest.relationship SET customer_id=1,account_id=999");
+        assertTrue(assertThrows(SQLException.class,()->process(day)).getMessage().contains("Missing account"));
+        sql("UPDATE core_ingest.relationship SET account_id=2");
+        sql("UPDATE core_ingest.account SET end_date='2025-01-01'");
+        assertTrue(assertThrows(SQLException.class,()->process(day)).getMessage().contains("precedes"));
+    }
+    @Test void rejectsEndDatedAndFutureAccountsAndRollsBackUpserts() throws Exception {
+        fixture();tx(day,1,10,"CR",1);
+        sql("UPDATE core_ingest.account SET end_date='2027-01-01'");
+        assertThrows(SQLException.class,()->process(day));
+        assertEquals("0",value("SELECT count(*) FROM core.customer"));
+        sql("UPDATE core_ingest.account SET end_date=NULL,start_date='2027-01-01'");
+        assertThrows(SQLException.class,()->process(day));
+        assertEquals("0",value("SELECT count(*) FROM core.balance"));
+    }
+    @Test void replayOnNowClosedAccountIsHarmless() throws Exception {
+        fixture();tx(day,1,10,"CR",1);process(day);
+        var next=day.plusDays(1);receipt(next);account(next,2);tx(next,1,10,"CR",1);
+        sql("UPDATE core_ingest.account SET end_date='2027-01-01' WHERE batch_date='"+next+"'");
+        assertEquals(0L,process(next).get("transaction"));
+        assertEquals("1",value("SELECT balance FROM core.balance"));
+    }
+    @Test void overflowRollsBackLedgerAndReferences() throws Exception {
+        fixture();tx(day,1,10,"CR",Long.MAX_VALUE);tx(day,2,11,"CR",1);
+        assertThrows(SQLException.class,()->process(day));
+        assertEquals("0",value("SELECT count(*) FROM core.transaction"));
+        assertEquals("0",value("SELECT count(*) FROM core.account"));
+        assertEquals("FAILED",value("SELECT status FROM core.batch_run"));
+        assertTrue(db.getAutoCommit());
+    }
+    @Test void aggregationAllowsNetWithinRangeDespiteLargeIntermediateTotal() throws Exception {
+        fixture();tx(day,1,10,"CR",Long.MAX_VALUE);tx(day,2,11,"CR",Long.MAX_VALUE);tx(day,3,12,"DR",Long.MAX_VALUE);
+        process(day);assertEquals(Long.toString(Long.MAX_VALUE),value("SELECT balance FROM core.balance"));
+    }
+    @Test void requiresReceiptButAcceptsRealEmptyIngestionAndProtectsCompletedDate() throws Exception {
+        assertThrows(SQLException.class,()->process(day));
+        for(String table:new String[]{"customer","account","relationship","transaction"})
+            Files.writeString(input.resolve(table+"_20261009.dat"),"");
+        new BatchIngestor().ingest(db,input,day);
+        assertEquals(0L,process(day).get("transaction"));
+        assertThrows(IllegalStateException.class,()->new BatchIngestor().ingest(db,input,day));
+        assertEquals("1",value("SELECT count(*) FROM core_ingest.batch_receipt"));
+    }
+    @Test void blocksOlderDatesAndUnfinishedAttempts() throws Exception {
+        receipt(day);process(day);receipt(day.minusDays(1));
+        assertThrows(SQLException.class,()->process(day.minusDays(1)));
+        sql("INSERT INTO core.batch_run(batch_date) VALUES ('2026-10-10')");
+        assertTrue(assertThrows(SQLException.class,()->process(day.plusDays(1))).getMessage().contains("unfinished"));
+        receipt(day.plusDays(2));
+        assertTrue(assertThrows(SQLException.class,()->process(day.plusDays(2))).getMessage().contains("unfinished"));
+    }
+    @Test void concurrentProcessorsPostOnce() throws Exception {
+        fixture();tx(day,1,10,"CR",100);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var start=new CountDownLatch(1);
+            Callable<java.util.Map<String,Long>> action=()-> { start.await();try(var c=connect()) { return new BatchProcessor().process(c,day); } };
+            var a=pool.submit(action);var b=pool.submit(action);start.countDown();
+            assertEquals(a.get(10,TimeUnit.SECONDS),b.get(10,TimeUnit.SECONDS));
+        }
+        assertEquals("100",value("SELECT balance FROM core.balance"));
+        assertEquals("1",value("SELECT count(*) FROM core.batch_run"));
+    }
+}

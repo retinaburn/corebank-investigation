@@ -1,0 +1,12 @@
+spring:
+  application:
+    name: corebank
+  main:
+    web-application-type: none
+
+# Relative paths resolve from the directory where you launch JBang.
+# These defaults assume you launch from the repository root.
+corebank:
+  input-directory: ./data/input
+  output-directory: ./data/output
+  error-directory: ./data/error

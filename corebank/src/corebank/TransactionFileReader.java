@@ -1,0 +1,35 @@
+package corebank;
+
+import java.nio.file.Path;
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.core.io.FileSystemResource;
+import corebank.BankingRecords.Transaction;
+import corebank.BankingRecords.TransactionType;
+
+/** Reads fixed-width Transaction input; reference and duplicate checks belong to staging validation. */
+public final class TransactionFileReader {
+    private TransactionFileReader() {}
+
+    public static FlatFileItemReader<Transaction> create(Path file) {
+        var tokenizer = new CodePointLineTokenizer(
+            new String[] {"transactionId", "accountId", "type", "amount"}, 19, 19, 6, 20);
+        var reader = new FlatFileItemReaderBuilder<Transaction>()
+            .name("transactionFileReader").resource(new FileSystemResource(file))
+            .strict(true).comments(new String[0]).lineTokenizer(tokenizer)
+            .fieldSetMapper(f -> new Transaction(
+                FileReaderSupport.positiveId(f.readString("transactionId")),
+                FileReaderSupport.positiveId(f.readString("accountId")),
+                TransactionType.valueOf(f.readString("type")),
+                amount(f.readString("amount"))))
+            .build();
+        FileReaderSupport.configure(reader);
+        return reader;
+    }
+
+    private static long amount(String value) {
+        if (!value.matches("[0-9]+"))
+            throw new IllegalArgumentException("Amount must be nonnegative integer cents");
+        return Long.parseLong(value);
+    }
+}

@@ -1,0 +1,4 @@
+{
+    "java.import.jbang.projectPerScript": true,
+    "java.compile.nullAnalysis.mode": "disabled"
+}

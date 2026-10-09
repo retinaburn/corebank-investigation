@@ -1,6 +1,6 @@
 # Corebank Investigation — Design
 
-Status: repository scaffold created with user authorization. PostgreSQL Compose configuration has been added; banking application implementation has not started. This document captures the conversation as of 2026-10-09.
+Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. Business tables and batch processing remain to be implemented. Updated 2026-10-09.
 
 ## Purpose and scope
 
@@ -12,7 +12,7 @@ Create a development and learning project, eventually in a new repository under 
 - Apache Camel routes developed using JBang and Camel MCP tooling.
 - A later opportunity to learn Kubernetes with kind and experiment with Apache Pulsar.
 
-The user authorized creating `~/code/corebank-investigation`. The repository contains the agreed scaffold and design document. PostgreSQL Compose configuration is now included. Application implementation remains future work.
+The user authorized creating `~/code/corebank-investigation`. The repository contains the agreed scaffold and design document. PostgreSQL Compose configuration is now included. The core now starts Spring Boot and binds directory settings from application.yaml to a Config record.
 
 ## Planned repository layout
 
@@ -35,20 +35,20 @@ This layout has been created as an initial scaffold. Docker Compose is the agree
 
 | Item | Convention |
 | --- | --- |
-| IDs | Java `long`; database `BIGINT` |
-| Money | Integer cents; Java `long` and database `BIGINT` |
+| IDs | Positive Java `long` (1 through Long.MAX_VALUE); database `BIGINT`; 19 file positions |
+| Money | Integer cents; Java `long` and database `BIGINT`; transaction amount field width 20 |
 | Example amount | `12345` represents 123.45 currency units |
 | Core input and output | Fixed-width files |
 | Field padding | Spaces |
 | Encoding | UTF-8 |
 | Line endings | LF (`\n`) |
-| Type field widths | 5 for account and relationship; 6 for transaction |
-| Customer text widths | 10 each for firstname, lastname, addressLine1, city, country; 2 for province |
+| Type field widths | 8 for account type; 9 for relationship type; 6 for transaction type |
+| Customer text widths | 10 each for firstname, lastname, city, country; 20 for addressLine1; 2 for province; 7 for postalCode |
 | Date field representation | ISO 8601 calendar date: `YYYY-MM-DD` |
 | Filename date representation | `YYYYMMDD` |
 | Internal date types | Java `LocalDate` and database `DATE` are the proposed implementation |
 
-ID and money widths, numeric alignment, and signed amount representation remain undefined. Field widths count Unicode code points after NFC normalization, not UTF-8 bytes. Reject overlength values rather than truncating them. Transaction type uses the codes `CR` (credit) and `DR` (debit), space-padded to the agreed six-character field width. Left-aligned text/dates and right-aligned numbers were suggested but not explicitly confirmed. An all-space optional date was also suggested.
+ID fields use 19 positions and prohibit zero and negative values. Transaction amounts occupy 20 positions. Balance output width and numeric alignment remain undecided. The transaction reader uses the proposed nonnegative amount convention as its working rule. Field widths count Unicode code points after NFC normalization, not UTF-8 bytes. Reject overlength values rather than truncating them. Transaction type uses the codes `CR` (credit) and `DR` (debit), space-padded to the agreed six-character field width. Left-aligned text/dates and right-aligned numbers were suggested but not explicitly confirmed. The account reader represents an absent endDate with ten spaces.
 
 ## Confirmed Unicode and text file contract
 
@@ -63,18 +63,57 @@ ID and money widths, numeric alignment, and signed amount representation remain 
 
 For example, NFC-normalized `José` occupies four code points but five UTF-8 bytes. Record byte lengths may therefore vary even though field positions are fixed in code points. Code points are not necessarily visual characters for every writing system. Java implementations must use code-point-aware counting and slicing rather than assuming `String.length()` counts code points.
 
-The agreed ten-position customer text fields remain deliberately short; longer names or addresses produce validation errors. A future legacy interface requiring fixed byte offsets would need a separate, explicit contract change.
+The ten-position first name, last name, city, and country fields remain deliberately short. addressLine1 allows 20 positions. Values exceeding their respective field widths produce validation errors. A future legacy interface requiring fixed byte offsets would need a separate, explicit contract change.
 
 ## Banking records
 
 | Record | Fields | Allowed values / notes |
 | --- | --- | --- |
-| Account | `accountid`, `startDate`, `endDate`, `type` | `endDate` optional; types `A1`, `A2`, `A3` |
-| Customer | `customerid`, `firstname`, `lastname`, `addressLine1`, `city`, `province`, `country` | Customer text widths as above; ID width still open |
-| Relationship | `accountid`, `customerid`, `type` | Types `R1`, `R2`, `R3` |
-| Transaction | `transactionid`, `accountid`, `type`, `amount` | Types `CR` (credit), `DR` (debit); amount in cents |
+| Account | `accountId`, `startDate`, `endDate`, `accountType` | `endDate` optional; AccountType values `SAVINGS`, `CHECKING` supersede A1/A2/A3 and are written in an 8-position field |
+| Customer | `customerId`, `firstName`, `lastName`, `addressLine1`, `city`, `province`, `postalCode`, `country` | All address fields are required and non-null; postalCode width 7; ID width 19 |
+| Relationship | `accountId`, `customerId`, `type` | RelationshipType values `PRIMARY`, `SECONDARY` replace R1/R2/R3 and are written in a 9-position field |
+| Transaction | `transactionId`, `accountId`, `type`, `amount` | Types `CR` (credit), `DR` (debit); amount in cents, width 20; reader accepts 0 through Long.MAX_VALUE |
 
 `accountid`, `customerid`, and `transactionid` use the ID convention above. The relationship key has not been decided.
+
+### Implementation and contract checks
+
+- Records are nested in BankingRecords in the corebank package. corebank/src/Core.java is the default-package JBang launcher; CoreApplication.java and Config.java reside in corebank/src/corebank. Production sources are under corebank/src; test sources remain under corebank/tests/corebank.
+- Config uses Spring @ConfigurationProperties with the corebank prefix. JBang includes corebank/application.yaml through //FILES application.yaml=../application.yaml; defaults use data/input, data/output, and data/error relative to the launch directory.
+- Customer addressLine1, city, province, postalCode, and country are required and must not be null. The convenience constructor that omitted these fields has been removed. The Customer compact constructor now enforces these five non-null requirements with Objects.requireNonNull. Whether blank or whitespace-only strings are rejected must also be made explicit in validation rules.
+- Account and relationship files use the full enum names, space-padded to 8 and 9 positions respectively. These widths supersede the original five-position fields. Customer postalCode occupies 7 positions. Widths count NFC-normalized Unicode code points; overlength values must be rejected, never truncated.
+- Keep this specification synchronized with explicit user decisions. Record observed implementation changes separately from unresolved contract decisions, and flag contradictions rather than silently relaxing validation.
+
+## Input file readers — implemented
+
+- Spring Batch 5.2.2 (managed by the existing Spring Boot 3.4.4 BOM) supplies FlatFileItemReader. Only spring-batch-infrastructure is added at this stage; the Batch starter, job repository, and database-backed jobs are deferred.
+- CodePointLineTokenizer normalizes NFC before checking exact record length and slicing by Unicode code point. It rejects control characters, BOMs, Unicode line/paragraph separators, and invalid surrogates.
+- CustomerFileReader.create(path) returns a new reader. The caller opens it with an ExecutionContext, reads until null, and closes it in a finally block. This reader is not yet wired into the startup runner or a batch job.
+- Customer widths in order: ID 19, firstName 10, lastName 10, addressLine1 20, city 10, province 2, postalCode 7, country 10. Total customer record width is 88 positions. The reader and tests now use the production width exclusively.
+- Files use strict UTF-8 decoding and LF separators. CRLF, BOMs, malformed UTF-8, blank records, and short/long records fail. Empty files are accepted; missing files fail. A final record without a trailing LF is accepted by the current reader.
+- Field padding is stripped when mapping to Customer. Alignment is not enforced pending the contract decision. All-space address fields currently become empty strings, not null; blank-address rejection remains undecided. Shared FileReaderSupport validates unsigned decimal digits and a value from 1 through Long.MAX_VALUE. Zero, negative IDs, explicit plus signs, and overflow are rejected by all four readers. Record constructors do not yet enforce this invariant for directly constructed objects.
+- Parsing failures include the resource and line number through Spring Batch. No skip policy is configured. Duplicate IDs and database reference checks remain for staging validation.
+- JUnit Jupiter 5.11.4 tests run through the matching JUnit Platform console standalone 1.11.4, explicitly pinned because the standalone artifact is not version-managed by the Boot BOM. Run from the repository root: `jbang corebank/tests/ReaderTests.java`.
+- Sixty-two tests cover all four input record types, both account types, optional end dates, strict calendar dates, production-width IDs including Long.MAX_VALUE, zero/negative IDs and overflow, Unicode normalization and boundaries, invalid records, UTF-8, and diagnostics.
+- AccountFileReader.create(path) uses fields at positions 1–19 (accountId), 20–29 (startDate), 30–39 (endDate), and 40–47 (accountType). startDate is required; endDate is either ten spaces or YYYY-MM-DD. Date ordering and account lifecycle rules remain for business validation. Both readers share strict UTF-8/LF handling through FileReaderSupport.
+
+### Relationship and transaction layouts
+
+| Record | Field | Positions (inclusive) | Width |
+| --- | --- | --- | --- |
+| Relationship | accountId | 1–19 | 19 |
+| Relationship | customerId | 20–38 | 19 |
+| Relationship | type | 39–47 | 9 |
+| Transaction | transactionId | 1–19 | 19 |
+| Transaction | accountId | 20–38 | 19 |
+| Transaction | type | 39–44 | 6 |
+| Transaction | amount | 45–64 | 20 |
+
+RelationshipFileReader.create(path) and TransactionFileReader.create(path) share the same UTF-8/NFC/LF handling and positive-ID validation as the existing readers. Relationship types are PRIMARY/SECONDARY; transaction types are CR/DR. Exact record widths are 47 and 64 code points respectively.
+
+The user selected a 20-position transaction amount field. This does not expand the Java long numeric range: values above Long.MAX_VALUE are rejected. Working implementation follows the proposed nonnegative-cent convention, accepting zero, rejecting signs and decimal fractions; CR/DR determines the eventual posting direction. No posting arithmetic is implemented yet. Confirm the amount-sign convention before database posting. Direct record constructors still permit values that the file readers reject.
+
+Readers validate individual records only. Cross-record references, duplicate detection, relationship uniqueness, staging, and posting remain future work.
 
 ## Database boundaries
 
@@ -234,9 +273,9 @@ For kind, shared file access and persistent database/broker storage need explici
 
 ## Open decisions
 
-- Final repository name confirmation; Java version/framework/build tool and dependency versions.
-- ID and money widths.
-- Field alignment and null representation.
+- Core currently uses Java 21, Spring Boot 3.4.4, and JBang. Future version upgrades remain separate decisions; JUnit console tests run through ReaderTests.java.
+- Balance output width. Transaction amount width is 20; ID width is 19, with zero and negative IDs prohibited.
+- Field alignment and blank/whitespace-only customer address validation. Optional endDate uses ten spaces in the implemented account reader. Null customer address fields are prohibited.
 - Transaction amount-sign rules and confirmation of credit/debit arithmetic.
 - Currency configuration or per-account currency; no FX requirement currently defined.
 - Exact changed-output rule for net-zero activity and newly created zero-balance accounts.

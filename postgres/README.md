@@ -63,13 +63,14 @@ The JBang launcher bundles postgres/changelog files as classpath resources:
 - 002-core-ingest.sql: the four staging tables.
 - 003-core-operational.sql: operational tables, audit triggers, and batch attempts.
 - 004-ingestion-receipt.sql: successful four-file ingestion receipts; old dates need re-ingestion.
+- 006-batch-jobs.sql: Spring Batch job/step execution metadata in core_batch.
 - 005-balance-output.sql: immutable dated balances and snapshot headers; existing completed dates are not backfilled.
 
 Liquibase stores history and checksums in public.databasechangelog, with a migration
 lock in public.databasechangeloglock. Every startup checks for pending changes;
 completed changesets are not rerun. Keep applied changesets and SQL files unchanged.
 For each future migration, add a new SQL file and a new changeset to the master XML,
-and bundle the SQL resource in Core.java, IngestionTests.java, ProcessingTests.java, and GeneratorTests.java using //FILES.
+and bundle the SQL resource in Core.java, IngestionTests.java, ProcessingTests.java, GeneratorTests.java, and BatchJobTests.java using //FILES.
 Use Liquibase-managed transactions; do not put BEGIN/COMMIT in the SQL files.
 
 Fresh volumes get all changesets. Existing volumes retain both application data and

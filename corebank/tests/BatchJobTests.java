@@ -1,5 +1,8 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21
+//DEPS org.springframework.batch:spring-batch-core
+//SOURCES ../src/corebank/Config.java ../src/corebank/batch/BatchJobRunner.java
+//SOURCES corebank/BatchJobRunnerTest.java
 //SOURCES ../src/corebank/BatchLocks.java ../src/corebank/output/BalanceExporter.java
 //DEPS org.springframework.boot:spring-boot-dependencies:3.4.4@pom
 //DEPS org.springframework.boot:spring-boot-starter
@@ -10,7 +13,7 @@
 //DEPS org.junit.platform:junit-platform-console-standalone:1.11.4
 //SOURCES ../src/corebank/BankingRecords.java ../src/corebank/ingest/BatchIngestor.java
 //SOURCES ../src/corebank/readers/*.java
-//SOURCES corebank/BatchProcessorTest.java ../src/corebank/processing/BatchProcessor.java
+//SOURCES ../src/corebank/processing/BatchProcessor.java
 
 //FILES db/changelog/db.changelog-master.xml=../../postgres/changelog/db.changelog-master.xml
 //FILES db/changelog/001-schemas.sql=../../postgres/changelog/001-schemas.sql
@@ -24,7 +27,7 @@ import org.junit.platform.console.ConsoleLauncher;
 import liquibase.integration.spring.SpringLiquibase;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
-public class ProcessingTests {
+public class BatchJobTests {
     public static void main(String[] args) throws Exception {
         if (System.getenv("COREBANK_TEST_DB_URL") == null)
             throw new IllegalArgumentException("Set COREBANK_TEST_DB_URL to a disposable database; tests erase operational and staging data.");
@@ -34,6 +37,6 @@ public class ProcessingTests {
             System.getenv("COREBANK_TEST_DB_PASSWORD")));
         migration.setChangeLog("classpath:db/changelog/db.changelog-master.xml");
         migration.afterPropertiesSet();
-        ConsoleLauncher.main("execute", "--select-class=corebank.BatchProcessorTest", "--fail-if-no-tests");
+        ConsoleLauncher.main("execute", "--select-class=corebank.BatchJobRunnerTest", "--fail-if-no-tests");
     }
 }

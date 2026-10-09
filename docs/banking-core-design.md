@@ -478,3 +478,32 @@ activity, replay exclusion, snapshot rollback, stable historical regeneration,
 full signed-long formatting, empty output, missing/legacy snapshots, file failures
 and conflicts, immutability, and concurrent exports. Tests use a disposable database
 and truncate output tables along with operational and staging tables.
+
+## Core container — implemented 2026-10-09
+
+`docker/corebank.Dockerfile` builds the existing Core.java entry point using
+JBang portable export and runs the resulting JAR plus dependency directory in a
+Java 21 JRE image as a non-root user. Tests and development tooling are excluded
+from the final image. Compose provides PostgreSQL connectivity and all three host
+data mounts. The `core` service is on-demand (`batch` profile), invoked with
+`docker compose -f docker/compose.yaml run --rm core` and an optional existing
+`--ingest`, `--process`, or `--output` command. It waits for healthy PostgreSQL.
+Trigger watching and automatic stage coordination remain future work.
+
+## Spring Batch orchestration — implemented 2026-10-09
+
+`--batch=YYYY-MM-DD` executes `dailyBankingJob` with ingest, process, and output
+tasklets. Migration 006 installs the Spring Batch 5.2.2 PostgreSQL metadata schema
+under `core_batch`. Job identity is the business date. Repeated completed jobs are
+no-ops; explicit output remains available for file regeneration. Ingest runs on
+restart only when business posting is not completed, allowing corrected files after
+validation failure. Existing posting and export idempotency reconcile successful
+business/file operations with a failed metadata update.
+
+Business services retain their dedicated connections and explicit transactions;
+Spring Batch uses separate transactional JDBC metadata and resourceless tasklet
+boundaries. `core.batch_run` describes posting, while job completion includes export.
+One session advisory lock serializes full jobs, and unresolved earlier jobs block
+later dates. Active/unknown metadata and abandoned core attempts require operator
+review. Manual stage commands remain available but must not race with the job.
+Trigger watching, scheduling, and automatic crash recovery remain future work.

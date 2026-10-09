@@ -1,5 +1,7 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21
+//DEPS org.springframework.batch:spring-batch-core
+//SOURCES corebank/batch/BatchJobRunner.java
 //SOURCES corebank/BatchLocks.java corebank/output/BalanceExporter.java
 //DEPS org.postgresql:postgresql
 //DEPS org.liquibase:liquibase-core
@@ -20,6 +22,7 @@
 //FILES db/changelog/003-core-operational.sql=../../postgres/changelog/003-core-operational.sql
 //FILES db/changelog/004-ingestion-receipt.sql=../../postgres/changelog/004-ingestion-receipt.sql
 //FILES db/changelog/005-balance-output.sql=../../postgres/changelog/005-balance-output.sql
+//FILES db/changelog/006-batch-jobs.sql=../../postgres/changelog/006-batch-jobs.sql
 
 import corebank.CoreApplication;
 

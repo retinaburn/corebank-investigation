@@ -30,5 +30,29 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  core:
+    build:
+      context: ..
+      dockerfile: docker/corebank.Dockerfile
+    # Until trigger watching exists, invoke this service with compose run --rm.
+    profiles: [batch]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      COREBANK_DB_URL: jdbc:postgresql://postgres:5432/corebank
+      COREBANK_DB_USER: postgres
+      COREBANK_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      COREBANK_INPUT_DIRECTORY: /data/input
+      COREBANK_OUTPUT_DIRECTORY: /data/output
+      COREBANK_ERROR_DIRECTORY: /data/error
+      TZ: UTC
+    volumes:
+      - ../data/input:/data/input
+      - ../data/output:/data/output
+      - ../data/error:/data/error
+    stop_grace_period: 30s
+
 volumes:
   postgres_data:

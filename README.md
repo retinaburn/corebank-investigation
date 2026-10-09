@@ -4,7 +4,7 @@ A Java banking batch and Apache Camel integration learning project.
 
 ## Status
 
-Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, atomic balance updates, dated balance snapshots, and balance-file generation are implemented. Trigger watching and Camel publication remain future work.
+Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, atomic balance updates, dated balance snapshots, and balance-file generation are implemented. Spring Batch orchestrates all three stages through `--batch`. Trigger watching and Camel publication remain future work.
 
 See [the design document](docs/banking-core-design.md) for agreed requirements and open decisions.
 
@@ -24,6 +24,41 @@ Runtime data is ignored by Git; directory placeholders are tracked. Docker Compo
 ## PostgreSQL
 
 See [PostgreSQL setup](postgres/README.md) for startup, connection, and persistence details.
+
+## Run the core in Docker
+
+The core image uses JBang 0.142.0 in a Java 21 build stage to export a portable
+application JAR and its dependency directory. The final Java 21 JRE image runs as
+user `10001` and contains the application, YAML configuration, migrations, and
+required libraries. It does not contain JBang, a compiler, source files, or tests.
+The Dockerfile-specific ignore file excludes tests, credentials, and runtime data
+from the build context. Rebuild after changing application code or migrations.
+
+With `docker/.env` configured as described above, run from the repository root:
+
+```sh
+docker compose -f docker/compose.yaml build core
+# Apply migrations and exit (no batch command supplied).
+docker compose -f docker/compose.yaml run --rm core
+# Run each stage in order; stop if any command fails.
+docker compose -f docker/compose.yaml run --rm core --ingest=2026-10-09
+docker compose -f docker/compose.yaml run --rm core --process=2026-10-09
+docker compose -f docker/compose.yaml run --rm core --output=2026-10-09
+```
+
+Compose loads `docker/.env` and starts PostgreSQL if needed, waiting for its health
+check before launching core. The container connects to `postgres:5432`; the host
+port override does not affect this connection. Input, output, and error directories
+are mounted at `/data/input`, `/data/output`, and `/data/error`. On Linux, ensure
+these host directories permit the container UID 10001 to read inputs and write
+outputs/errors, or use `docker compose run --user "$(id -u):$(id -g)" --rm core ...`.
+
+Core is an on-demand service in the `batch` profile: ordinary `compose up -d`
+starts PostgreSQL only, while explicitly targeting `core` with `run` activates it.
+Each invocation exits on completion; no trigger watcher or automatic restart is
+configured. A failed output command can be retried independently without ingesting
+or processing again. Tests remain separate development commands using the disposable
+test database; they are not run during this image build.
 
 ## Run and test the core
 
@@ -66,7 +101,7 @@ relationship_20261009.dat, and transaction_20261009.dat in data/input.
 Override the directory with `--corebank.input-directory=/path/to/input`.
 All four files must exist; empty files are accepted. Publish complete files before
 running and do not modify them during ingestion. The command exits after loading.
-Liquibase runs automatically before ingestion. Running without `--ingest`, `--process`, or `--output` connects
+Liquibase runs automatically before ingestion. Running without `--ingest`, `--process`, `--output`, or `--batch` connects
 to PostgreSQL, applies pending migrations, and exits without loading files.
 See [database migration setup](postgres/README.md#liquibase-migrations).
 
@@ -79,6 +114,67 @@ Duplicate business keys are retained for processing validation, not silently ove
 This command only stages data. The separate --process command validates cross-record
 references, updates core tables, posts balances, and saves output snapshots. The --output
 command writes balance files. Trigger-file watching and Camel publication remain future steps.
+
+### Run the complete batch job
+
+```sh
+jbang corebank/src/Core.java --batch=2026-10-09
+# Or, after rebuilding the image:
+docker compose -f docker/compose.yaml run --rm core --batch=2026-10-09
+```
+
+`dailyBankingJob` runs `ingest` → `process` → `output` synchronously. The business
+date is its sole identifying parameter; there is no timestamp or run-ID incrementer.
+Spring Batch 5.2.2 (managed by the existing Boot BOM) stores job/step history in the
+new `core_batch` schema, created by Liquibase migration 006. `core.batch_run` remains
+the business posting audit; job completion additionally requires successful output.
+A failed job exits nonzero. Repeating an already completed job is a successful no-op;
+use `--output` to regenerate a subsequently deleted file.
+
+Retry the same `--batch` command after correcting a failure:
+
+- Missing/malformed input: fix the files; ingestion runs again.
+- Failed posting: fix the inputs; ingestion reloads them and processing retries.
+- Failed output after successful posting: ingestion checks business completion and
+  skips reading files; the completed process step is skipped and export retries.
+- Posting committed before its step completion was recorded: the processor's
+  completed-date check prevents double posting when that step is retried.
+
+The ingest step is restartable even after step success so corrected inputs can be
+reloaded. Its business-state check prevents replacing a completed batch. Export's
+existing identical-file check also covers publication before step metadata commits.
+Tasklets use a resourceless transaction manager because existing services explicitly
+own their JDBC transactions. Spring Batch metadata uses a separate JDBC transaction
+manager; metadata and business commits are not one atomic transaction.
+
+A dedicated database session lock allows one `--batch` invocation at a time across
+instances. A concurrent launch fails promptly. An earlier unfinished job blocks a
+later date, including an earlier output failure. `STARTING`, `STARTED`, `STOPPING`,
+and `UNKNOWN` job states require operator investigation, as does a core `RUNNING`
+attempt. A process crash may leave these states even though its locks are released.
+There is no automatic abandoned-job recovery. Confirm the old process has ended,
+inspect business and step history, and reconcile both before restarting; never mark
+committed business posting as failed. Retain job metadata with its business data.
+
+Individual `--ingest`, `--process`, and `--output` commands remain available for
+manual diagnosis/recovery. They do not participate in the job-level ordering guard;
+do not run them concurrently with `--batch`. There is no trigger watcher or scheduler
+in this change. Choose exactly one command per invocation.
+
+### Batch orchestration integration tests
+
+Against a disposable PostgreSQL database only:
+
+```sh
+COREBANK_TEST_DB_URL=jdbc:postgresql://localhost:55432/corebank_test \
+COREBANK_TEST_DB_PASSWORD=test_only jbang corebank/tests/BatchJobTests.java
+```
+
+Nine tests cover full posting/output, duplicate jobs, empty/missing input, corrected
+posting retries, export-only recovery, posting/metadata reconciliation, concurrent
+launch protection, chronological failure blocking, and abandoned execution handling.
+They erase application data and `core_batch` job history. They are not packaged in
+the runtime image.
 
 ### Process a staged batch
 
@@ -135,7 +231,7 @@ jbang corebank/src/Core.java --output=2026-10-09
 
 This writes `data/output/balance_20261009.dat`. Override the directory with
 `--corebank.output-directory=/path/to/output`. Use --ingest, --process, and --output
-separately, in that order; processing does not automatically write a file.
+separately, in that order, or use --batch to coordinate them; processing does not automatically write a file.
 
 Include new accounts even when their balance is zero and
 there are no transactions. Include existing accounts only when the batch posts

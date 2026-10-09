@@ -1,0 +1,11 @@
+# Allow only application build inputs; exclude secrets, tests, and runtime data.
+**
+!corebank/
+!corebank/src/
+!corebank/src/**
+!corebank/application.yaml
+!postgres/
+!postgres/changelog/
+!postgres/changelog/**
+!docker/
+!docker/corebank.Dockerfile

@@ -95,4 +95,7 @@ Run the normal core launcher to apply pending migrations. Account inserts create
 zero balances atomically; transactions referencing any end-dated account are rejected.
 Transactions are immutable and reference a batch attempt with the same business date.
 See docs/banking-core-design.md, Operational schema, for lifecycle and posting rules.
-The migration creates structure only; staging-to-core posting is not implemented.
+The migration creates structure only. The --process command implements staging-to-core
+validation, posting, balance updates, and batch-attempt tracking. The core_output schema
+exists, but its balance snapshot table and output generation remain pending; see the
+balance output contract in docs/banking-core-design.md.

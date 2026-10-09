@@ -48,7 +48,7 @@ This layout has been created as an initial scaffold. Docker Compose is the agree
 | Filename date representation | `YYYYMMDD` |
 | Internal date types | Java `LocalDate` and database `DATE` are the proposed implementation |
 
-ID fields use 19 positions and prohibit zero and negative values. Transaction amounts occupy 20 positions. Balance output width and numeric alignment remain undecided. The transaction reader uses the proposed nonnegative amount convention as its working rule. Field widths count Unicode code points after NFC normalization, not UTF-8 bytes. Reject overlength values rather than truncating them. Transaction type uses the codes `CR` (credit) and `DR` (debit), space-padded to the agreed six-character field width. Left-aligned text/dates and right-aligned numbers were suggested but not explicitly confirmed. The account reader represents an absent endDate with ten spaces.
+ID fields use 19 positions and prohibit zero and negative values. Transaction amounts occupy 20 positions. Balance output uses a 19-position account ID and a 20-position signed balance in cents, both right-aligned and space-padded. Transaction amounts are nonnegative; CR adds and DR subtracts during posting. Field widths count Unicode code points after NFC normalization, not UTF-8 bytes. Reject overlength values rather than truncating them. Transaction type uses the codes `CR` (credit) and `DR` (debit), space-padded to the agreed six-character field width. Input alignment is not enforced by the readers; the generator writes text/dates left-aligned and numbers right-aligned. The account reader represents an absent endDate with ten spaces.
 
 ## Confirmed Unicode and text file contract
 
@@ -74,7 +74,7 @@ The ten-position first name, last name, city, and country fields remain delibera
 | Relationship | `accountId`, `customerId`, `type` | RelationshipType values `PRIMARY`, `SECONDARY` replace R1/R2/R3 and are written in a 9-position field |
 | Transaction | `transactionId`, `accountId`, `type`, `amount` | Types `CR` (credit), `DR` (debit); amount in cents, width 20; reader accepts 0 through Long.MAX_VALUE |
 
-`accountid`, `customerid`, and `transactionid` use the ID convention above. The relationship key has not been decided.
+`accountid`, `customerid`, and `transactionid` use the ID convention above. Relationships are keyed by (account_id, customer_id), with one type per pair.
 
 ### Implementation and contract checks
 
@@ -88,14 +88,14 @@ The ten-position first name, last name, city, and country fields remain delibera
 
 - Spring Batch 5.2.2 (managed by the existing Spring Boot 3.4.4 BOM) supplies FlatFileItemReader. The readers use spring-batch-infrastructure; the Batch starter, job repository, and database-backed jobs are deferred.
 - CodePointLineTokenizer normalizes NFC before checking exact record length and slicing by Unicode code point. It rejects control characters, BOMs, Unicode line/paragraph separators, and invalid surrogates.
-- CustomerFileReader.create(path) returns a new reader. The caller opens it with an ExecutionContext, reads until null, and closes it in a finally block. This reader is not yet wired into the startup runner or a batch job.
+- CustomerFileReader.create(path) returns a new reader. The caller opens it with an ExecutionContext, reads until null, and closes it in a finally block. The --ingest command invokes this reader through BatchIngestor; a Spring Batch job remains deferred.
 - Customer widths in order: ID 19, firstName 10, lastName 10, addressLine1 20, city 10, province 2, postalCode 7, country 10. Total customer record width is 88 positions. The reader and tests now use the production width exclusively.
 - Files use strict UTF-8 decoding and LF separators. CRLF, BOMs, malformed UTF-8, blank records, and short/long records fail. Empty files are accepted; missing files fail. A final record without a trailing LF is accepted by the current reader.
 - Field padding is stripped when mapping to Customer. Alignment is not enforced pending the contract decision. All-space address fields currently become empty strings, not null; blank-address rejection remains undecided. Shared FileReaderSupport validates unsigned decimal digits and a value from 1 through Long.MAX_VALUE. Zero, negative IDs, explicit plus signs, and overflow are rejected by all four readers. Record constructors do not yet enforce this invariant for directly constructed objects.
-- Parsing failures include the resource and line number through Spring Batch. No skip policy is configured. Duplicate IDs and database reference checks remain for staging validation.
+- Parsing failures include the resource and line number through Spring Batch. No skip policy is configured. BatchProcessor checks duplicate business keys and cross-record references after ingestion.
 - JUnit Jupiter 5.11.4 tests run through the matching JUnit Platform console standalone 1.11.4, explicitly pinned because the standalone artifact is not version-managed by the Boot BOM. Run from the repository root: `jbang corebank/tests/ReaderTests.java`.
 - Sixty-two tests cover all four input record types, both account types, optional end dates, strict calendar dates, production-width IDs including Long.MAX_VALUE, zero/negative IDs and overflow, Unicode normalization and boundaries, invalid records, UTF-8, and diagnostics.
-- AccountFileReader.create(path) uses fields at positions 1–19 (accountId), 20–29 (startDate), 30–39 (endDate), and 40–47 (accountType). startDate is required; endDate is either ten spaces or YYYY-MM-DD. Date ordering and account lifecycle rules remain for business validation. Both readers share strict UTF-8/LF handling through FileReaderSupport.
+- AccountFileReader.create(path) uses fields at positions 1–19 (accountId), 20–29 (startDate), 30–39 (endDate), and 40–47 (accountType). startDate is required; endDate is either ten spaces or YYYY-MM-DD. BatchProcessor validates date ordering and account eligibility for new transactions. Both readers share strict UTF-8/LF handling through FileReaderSupport.
 
 ### Relationship and transaction layouts
 
@@ -111,9 +111,9 @@ The ten-position first name, last name, city, and country fields remain delibera
 
 RelationshipFileReader.create(path) and TransactionFileReader.create(path) share the same UTF-8/NFC/LF handling and positive-ID validation as the existing readers. Relationship types are PRIMARY/SECONDARY; transaction types are CR/DR. Exact record widths are 47 and 64 code points respectively.
 
-The user selected a 20-position transaction amount field. This does not expand the Java long numeric range: values above Long.MAX_VALUE are rejected. Working implementation follows the proposed nonnegative-cent convention, accepting zero, rejecting signs and decimal fractions; CR/DR determines the eventual posting direction. No posting arithmetic is implemented yet. Confirm the amount-sign convention before database posting. Direct record constructors still permit values that the file readers reject.
+The user selected a 20-position transaction amount field. This does not expand the Java long numeric range: values above Long.MAX_VALUE are rejected. Transaction inputs use nonnegative cents, accepting zero and rejecting signs and decimal fractions. Posting adds CR amounts and subtracts DR amounts; resulting balances may be negative. Direct record constructors still permit values that the file readers reject.
 
-Readers validate individual records only. Cross-record references, duplicate detection, relationship uniqueness, staging, and posting remain future work.
+Readers validate individual records only. BatchIngestor stages records; BatchProcessor validates cross-record references and duplicate business keys, then posts operational updates. Relationships are unique by account/customer pair.
 
 ## Database boundaries
 
@@ -142,9 +142,9 @@ transaction_20261009.dat
 batch_20261009.trg
 ```
 
-Arrival of `batch_YYYYMMDD.trg` in `input/` triggers the core batch for that date. Empty trigger contents were suggested; the filename supplies the date.
+Planned trigger watching will start the core batch for that date when `batch_YYYYMMDD.trg` arrives in `input/`; it is not implemented yet. Empty trigger contents were suggested; the filename supplies the date.
 
-The core:
+The intended core flow (steps 1–4 implemented; steps 5–6 pending):
 
 1. Reads the matching data files into `core_ingest`.
 2. Validates the staged records.
@@ -153,11 +153,39 @@ The core:
 5. Writes a dated balance snapshot into `core_output`.
 6. Generates `balance_YYYYMMDD.dat` from that snapshot.
 
-The only currently requested business output is the account balance file. It contains exactly `accountid` and `balance` (in cents), and only changed accounts rather than a full account snapshot. Field widths remain undecided. Clarify whether “changed” includes accounts with transactions that net to zero, or newly created zero-balance accounts.
+### Balance output contract — confirmed 2026-10-09
 
-Customer, account, and relationship inputs are full-record updates; partial updates are not supported. Input files must have at most one record per business key per batch date. Future Camel staging must therefore upsert by batch date and business key before extraction. Distinct transactions remain distinct by `transactionid`, not by account ID. Relationship key definition remains open.
+The only requested business output is `balance_YYYYMMDD.dat`, containing exactly
+`accountid` and the final account `balance` in integer cents for the batch date.
+Output snapshots and file generation are not implemented yet.
 
-Currency scope is CAD/USD, using integer cents. No currency field or foreign-exchange behaviour has been specified; decide whether a run uses one configured currency or accounts carry a currency before supporting both simultaneously. Proposed posting convention is balance plus credits minus debits, using nonnegative transaction amounts; the amount-sign convention remains to be confirmed.
+Include each qualifying account once:
+
+- Accounts newly created by the batch, including zero-balance accounts with no transactions.
+- Existing accounts with at least one newly posted transaction in the batch, including zero-amount transactions and activity that nets to zero.
+- Exclude existing accounts with no newly posted transactions, even if their reference data was updated. Identical transaction replays skipped by processing do not count as new activity.
+
+Newly created zero-balance accounts are the explicit exception to the transaction-activity requirement. An account both created and transacted in the batch appears once with its final balance. The output amount is the closing balance, not the batch's net transaction amount.
+
+| Field | Positions (inclusive) | Width | Representation |
+| --- | --- | --- | --- |
+| accountid | 1–19 | 19 | Positive decimal ID, right-aligned, space-padded |
+| balance | 20–39 | 20 | Signed integer cents, right-aligned, space-padded |
+
+Each record is 39 positions followed by LF, encoded as UTF-8 without a BOM.
+Negative balances use a leading minus immediately before the digits; zero and
+positive balances have no sign. Do not write decimal points, thousands separators,
+headers, or delimiters. The balance field accommodates the full signed Java long /
+PostgreSQL BIGINT range, including `-9223372036854775808`.
+
+The planned snapshot captures these selected accounts and their final balances by
+batch date. The proposed recovery design commits it with posting and generates the
+file from the saved snapshot, allowing file retries without reposting transactions
+or reading balances changed by later batches.
+
+Customer, account, and relationship inputs are full-record updates; partial updates are not supported. Input files must have at most one record per business key per batch date. Future Camel staging must therefore upsert by batch date and business key before extraction. Distinct transactions remain distinct by `transactionid`, not by account ID. The relationship business key is (account_id, customer_id).
+
+Currency scope is CAD/USD, using integer cents. No currency field or foreign-exchange behaviour has been specified; decide whether a run uses one configured currency or accounts carry a currency before supporting both simultaneously. Implemented posting adds credits and subtracts debits, using nonnegative transaction amounts.
 
 The core has no direct dependency on Redpanda or Camel. It communicates through files and its database schemas.
 
@@ -274,14 +302,11 @@ For kind, shared file access and persistent database/broker storage need explici
 ## Open decisions
 
 - Core currently uses Java 21, Spring Boot 3.4.4, and JBang. Future version upgrades remain separate decisions; JUnit console tests run through ReaderTests.java.
-- Balance output width. Transaction amount width is 20; ID width is 19, with zero and negative IDs prohibited.
-- Field alignment and blank/whitespace-only customer address validation. Optional endDate uses ten spaces in the implemented account reader. Null customer address fields are prohibited.
-- Transaction amount-sign rules and confirmation of credit/debit arithmetic.
+- Input field alignment enforcement and blank/whitespace-only customer address validation. Optional endDate uses ten spaces in the implemented account reader. Null customer address fields are prohibited.
 - Currency configuration or per-account currency; no FX requirement currently defined.
-- Exact changed-output rule for net-zero activity and newly created zero-balance accounts.
-- Relationship uniqueness, multiple types per account/customer pair, and deletion semantics.
-- Duplicate-key rejection behaviour, invalid records, missing files, rejected batches, and error-directory contents.
-- Batch identity, same-date corrections/reruns, retention, and file archival.
+- Explicit deletion semantics; omitted reference records currently remain unchanged.
+- Error-directory contents and error artifact publication; missing files, invalid records, and duplicate-key rejection are already handled by ingestion/processing.
+- Recovery of abandoned RUNNING attempts, corrections to completed dates, retention, and file archival. Failed dates can already be re-ingested/retried; completed-date processing retries are no-ops.
 
 Deferred Camel decisions: topic names and message formats, upsert ordering, date-transition coordination, daily extraction scheduling, and output publication/recovery. These do not need to be resolved for the initial core design.
 
@@ -309,9 +334,9 @@ Working staging policy: require all four files, accept empty files, reject parsi
 errors, and atomically replace all rows for the requested date. Preserve prior rows
 on failure and serialize same-date loads through a transaction advisory lock.
 Rows retain source filename and line; business-key duplicates and unresolved
-references are preserved for the future validator. Staging identity is date plus
-source line within each record-type table, so relationship business-key policy
-remains open. Inserts are grouped in 500-row JDBC batches, with a single commit
+references are preserved for BatchProcessor validation. Staging identity is date plus
+source line within each record-type table; processing enforces relationship uniqueness
+by (account_id, customer_id). Inserts are grouped in 500-row JDBC batches, with a single commit
 for all four files. Files must remain unchanged during the load.
 
 This is an explicit staging command, not yet a Spring Batch job or trigger watcher.
@@ -328,7 +353,7 @@ single changelog. Initial changesets create schemas and staging tables, adopting
 known existing objects using IF NOT EXISTS. History, checksums, and locks live in
 public.databasechangelog and public.databasechangeloglock and persist with the volume.
 New migrations are appended as new changesets; applied scripts must not be edited.
-Running the core without --ingest now connects to the database, migrates, and exits.
+Running the core without --ingest or --process connects to the database, migrates, and exits.
 Migration failure prevents ingestion. Liquibase handles migration transactions;
 BatchIngestor continues to explicitly manage its separate JDBC ingestion transaction.
 
@@ -352,25 +377,23 @@ this while holding a row lock that conflicts with concurrent account closure.
 Closing an account does not invalidate its historical transactions.
 
 Account insertion automatically creates a zero balance in the same transaction.
-A database trigger implements this because there is no account-creation service yet.
-The future application must not also insert the initial balance. Balances are signed
+A database trigger implements this; BatchProcessor relies on it and does not also insert the initial balance. Balances are signed
 BIGINT cents. Transactions use nonnegative BIGINT amounts and CR/DR direction.
 Transaction IDs are globally unique; updates/deletes are rejected. Corrections must
-use a new reversing transaction. A replay must compare existing contents before
-being treated as a no-op; conflict handling belongs to the future posting service.
+use a new reversing transaction. BatchProcessor compares existing contents before treating a replay as a no-op and rejects conflicts.
 
 Each batch_run row represents an attempt with RUNNING, COMPLETED, or FAILED status,
 start/finish timestamps, four nonnegative record counts, and optional failure text.
 Counts describe successfully applied records, not raw staging rows. Failed attempts
 can be retried; only one RUNNING or COMPLETED attempt is allowed per business date.
-Transactions reference both the run ID and its matching business date. Future posting
-must create the attempt first, commit operational changes and successful completion
-together, and record failure after rolling back operational changes. Crash recovery
+Transactions reference both the run ID and its matching business date. BatchProcessor
+creates the attempt first, commits operational changes and successful completion
+together, and records failure after rolling back operational changes. Crash recovery
 and correction of completed dates remain future workflow decisions.
 
 This migration does not post staged records, update balances on transaction insert,
-or populate batch runs. Those actions require an atomic application posting flow.
-core_output.balance snapshots remain future work; their output format is still open.
+or populate batch runs. BatchProcessor implements those actions in the application.
+core_output.balance snapshots remain future work; the confirmed output contract is described above.
 
 ## Development data generator — implemented 2026-10-09
 

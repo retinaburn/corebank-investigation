@@ -75,9 +75,10 @@ All four loads commit together; any parsing or database failure rolls back the l
 A rerun atomically replaces that date's staged rows and retains other dates.
 Same-date loads are serialized using a PostgreSQL transaction advisory lock.
 JDBC inserts execute in groups of 500 within one transaction.
-Duplicate business keys are retained for future validation, not silently overwritten.
-This command only stages data: trigger-file watching, cross-record validation,
-core-table updates, balance posting, and output generation remain future steps.
+Duplicate business keys are retained for processing validation, not silently overwritten.
+This command only stages data. The separate --process command validates cross-record
+references, updates core tables, and posts balances. Trigger-file watching and output
+generation remain future steps.
 
 ### Process a staged batch
 
@@ -122,6 +123,22 @@ the original process/connection has ended and inspect the attempt before marking
 an abandoned RUNNING row FAILED with completed_at and an explanatory error_message.
 A COMPLETED attempt must never be changed to FAILED. Retry after recovery.
 Trigger watching, output snapshots, and balance-file generation remain future work.
+
+### Balance output — agreed, not yet implemented
+
+The next stage saves dated balances in `core_output.balance` and generates
+`balance_YYYYMMDD.dat`. Include new accounts even when their balance is zero and
+there are no transactions. Include existing accounts only when the batch posts
+new transactions, including zero-amount or net-zero activity. Skipped transaction
+replays and reference-only updates do not qualify an existing account for output.
+Each qualifying account appears once with its final balance in cents.
+
+Records contain a 19-position account ID followed by a 20-position signed balance,
+both right-aligned and space-padded: 39 positions plus LF, UTF-8 without a BOM.
+Negative balances use a minus sign; zero and positive values have no sign. There
+are no headers, delimiters, or decimal points. See the
+[balance output contract](docs/banking-core-design.md#balance-output-contract--confirmed-2026-10-09).
+Snapshot creation and file generation are pending; there is no output command yet.
 
 ### Processing integration tests
 

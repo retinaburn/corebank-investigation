@@ -1,0 +1,39 @@
+///usr/bin/env jbang "$0" "$@" ; exit $?
+//JAVA 21
+//DEPS org.springframework.boot:spring-boot-dependencies:3.4.4@pom
+//DEPS org.springframework.boot:spring-boot-starter
+//DEPS org.springframework.batch:spring-batch-infrastructure
+//DEPS org.postgresql:postgresql
+//DEPS org.liquibase:liquibase-core
+//DEPS org.springframework:spring-jdbc
+//DEPS org.junit.platform:junit-platform-console-standalone:1.11.4
+//SOURCES ../src/corebank/BankingRecords.java ../src/corebank/ingest/BatchIngestor.java
+//SOURCES ../src/corebank/readers/*.java
+//SOURCES corebank/GeneratorTest.java
+//SOURCES ../src/corebank/generator/BatchGenerator.java
+//FILES generator/firstnames.txt=../src/resources/firstnames.txt
+//FILES generator/lastnames.txt=../src/resources/lastnames.txt
+//FILES generator/streets.txt=../src/resources/streets.txt
+
+//FILES db/changelog/db.changelog-master.xml=../../postgres/changelog/db.changelog-master.xml
+//FILES db/changelog/001-schemas.sql=../../postgres/changelog/001-schemas.sql
+//FILES db/changelog/002-core-ingest.sql=../../postgres/changelog/002-core-ingest.sql
+//FILES db/changelog/003-core-operational.sql=../../postgres/changelog/003-core-operational.sql
+
+import org.junit.platform.console.ConsoleLauncher;
+import liquibase.integration.spring.SpringLiquibase;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+public class GeneratorTests {
+    public static void main(String[] args) throws Exception {
+        if (System.getenv("COREBANK_TEST_DB_URL") == null)
+            throw new IllegalArgumentException("Set COREBANK_TEST_DB_URL to a disposable database; tests delete ALL operational and staging rows.");
+        var migration = new SpringLiquibase();
+        migration.setDataSource(new DriverManagerDataSource(System.getenv("COREBANK_TEST_DB_URL"),
+            System.getenv().getOrDefault("COREBANK_TEST_DB_USER", "postgres"),
+            System.getenv("COREBANK_TEST_DB_PASSWORD")));
+        migration.setChangeLog("classpath:db/changelog/db.changelog-master.xml");
+        migration.afterPropertiesSet();
+        ConsoleLauncher.main("execute", "--select-class=corebank.GeneratorTest", "--fail-if-no-tests");
+    }
+}

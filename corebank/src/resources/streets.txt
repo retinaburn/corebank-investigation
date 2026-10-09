@@ -1,0 +1,21 @@
+#Streets 15 characters max (leaves 5 for house number)
+Main St
+King St
+Queen St
+Bay St
+Maple Ave
+Oak Rd
+Cedar Lane
+Pine St
+Elm St
+Birch Ave
+Willow Rd
+Lakeview Dr
+River Rd
+Park Ave
+Church St
+Victoria St
+College St
+Dundas St
+Yonge St
+Bloor St

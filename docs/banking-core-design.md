@@ -371,3 +371,16 @@ and correction of completed dates remain future workflow decisions.
 This migration does not post staged records, update balances on transaction insert,
 or populate batch runs. Those actions require an atomic application posting flow.
 core_output.balance snapshots remain future work; their output format is still open.
+
+## Development data generator — implemented 2026-10-09
+
+Generate.java provides a separate JBang/picocli command. It reads operational
+reference data using a read-only repeatable-read transaction, then creates selected
+record types and empty files for other types. Per-type defaults are 10 when selected;
+--all selects every type and explicit counts override its defaults. See README for
+usage and limitations. Transactions exclude every end-dated account and accounts
+starting after the business date. Generated accounts start on the business date.
+All output follows the NFC/code-point/UTF-8/LF contract; text/dates are left-aligned
+with spaces on the right, and numbers are right-aligned.
+Generation validates records through integration tests with existing readers.
+It emits no trigger and performs no migrations or database writes.

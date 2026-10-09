@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+**/target/
+**/build/
+*.class
+*.log
+/data/input/*
+!/data/input/.gitkeep
+/data/output/*
+!/data/output/.gitkeep
+/data/error/*
+!/data/error/.gitkeep

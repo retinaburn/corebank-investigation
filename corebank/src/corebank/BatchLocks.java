@@ -10,6 +10,8 @@ public final class BatchLocks {
 
     public static final int JOB_LOCK_NAMESPACE = 1129271880;
 
+    public static final int MONITOR_LOCK_NAMESPACE = 1129271881;
+
     private BatchLocks() {}
 
     public static int dateKey(LocalDate date) {

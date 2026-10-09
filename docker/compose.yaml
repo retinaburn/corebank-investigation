@@ -34,8 +34,8 @@ services:
     build:
       context: ..
       dockerfile: docker/corebank.Dockerfile
-    # Until trigger watching exists, invoke this service with compose run --rm.
-    profiles: [batch]
+    # Handled failures exit for operator correction; do not restart-loop a bad batch.
+    command: ["--watch"]
     restart: "no"
     depends_on:
       postgres:

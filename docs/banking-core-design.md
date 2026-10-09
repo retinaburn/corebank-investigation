@@ -1,6 +1,6 @@
 # Corebank Investigation — Design
 
-Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, posting, output snapshots, and balance-file generation are implemented; trigger watching and Camel publication remain future work. Updated 2026-10-09.
+Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, posting, output snapshots, and balance-file generation are implemented; trigger monitoring is implemented; Camel publication remains future work. Updated 2026-10-09.
 
 ## Purpose and scope
 
@@ -142,7 +142,7 @@ transaction_20261009.dat
 batch_20261009.trg
 ```
 
-Planned trigger watching will start the core batch for that date when `batch_YYYYMMDD.trg` arrives in `input/`; it is not implemented yet. Empty trigger contents were suggested; the filename supplies the date.
+The core `--watch` monitor starts the batch when `batch_YYYYMMDD.trg` arrives in input. Empty contents are sufficient; the filename supplies the date. See the trigger lifecycle below.
 
 The implemented core flow (--ingest, then --process, then --output):
 
@@ -438,7 +438,7 @@ Migration 004 records successful ingestion atomically, including all-empty batch
 Pre-migration staging is preserved but must be re-ingested to receive a receipt.
 ProcessingTests.java runs 20 PostgreSQL integration tests against a disposable DB,
 including snapshot and output coverage. Output snapshots commit with posting;
-file export is a separate command. Trigger watching remains a future step.
+file export is a separate command. The `--watch` monitor invokes the full job.
 
 
 ## Balance snapshots and export — implemented 2026-10-09
@@ -485,10 +485,9 @@ and truncate output tables along with operational and staging tables.
 JBang portable export and runs the resulting JAR plus dependency directory in a
 Java 21 JRE image as a non-root user. Tests and development tooling are excluded
 from the final image. Compose provides PostgreSQL connectivity and all three host
-data mounts. The `core` service is on-demand (`batch` profile), invoked with
-`docker compose -f docker/compose.yaml run --rm core` and an optional existing
-`--ingest`, `--process`, or `--output` command. It waits for healthy PostgreSQL.
-Trigger watching and automatic stage coordination remain future work.
+data mounts. The `core` service now defaults to `--watch` and waits for healthy PostgreSQL.
+Explicit stage or batch arguments to `compose run --rm core` override monitoring.
+Automatic restart is disabled so failures require correction.
 
 ## Spring Batch orchestration — implemented 2026-10-09
 
@@ -506,4 +505,21 @@ boundaries. `core.batch_run` describes posting, while job completion includes ex
 One session advisory lock serializes full jobs, and unresolved earlier jobs block
 later dates. Active/unknown metadata and abandoned core attempts require operator
 review. Manual stage commands remain available but must not race with the job.
-Trigger watching, scheduling, and automatic crash recovery remain future work.
+Trigger monitoring is implemented below; time-based scheduling and automatic crash recovery remain future work.
+
+## Trigger lifecycle — implemented 2026-10-09
+
+Core polls for exact `batch_YYYYMMDD.trg` filenames in ascending order, including
+startup backlog. A single monitor lease spans scanning and terminal publication.
+It claims a trigger by renaming it to `batch_YYYYMMDD.INPROGRESS.trg` in input,
+requires all four inputs immediately, and invokes the existing batch job.
+Success publishes `batch_YYYYMMDD.COMPLETE.trg` in output. Handled failure publishes
+`batch_YYYYMMDD.ERROR.trg` in error with timestamp, phase and full exception details.
+Both paths remove INPROGRESS after terminal publication. Cross-mount publication
+uses a destination-local temporary file and atomic rename, then source deletion.
+
+Failure stops the monitor and an earlier ERROR blocks later dates on restart.
+Corrected dates are retried by publishing a new ready trigger. Previous error
+reports are archived on replacement or successful retry. A forced crash or file
+finalization failure can leave INPROGRESS; encountering one stops monitoring for
+operator review. No automatic business/metadata crash-state recovery is attempted.

@@ -10,6 +10,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import corebank.ingest.BatchIngestor;
 import corebank.batch.BatchJobRunner;
+import corebank.batch.TriggerMonitor;
 import corebank.processing.BatchProcessor;
 import corebank.output.BalanceExporter;
 import lombok.extern.slf4j.Slf4j;
@@ -27,16 +28,21 @@ public class CoreApplication {
         return args -> {
             log.info("Data directories: input={}, output={}, error={}",
                 config.inputDirectory(), config.outputDirectory(), config.errorDirectory());
-            var commands = java.util.stream.Stream.of("ingest", "process", "output", "batch")
+            var commands = java.util.stream.Stream.of("ingest", "process", "output", "batch", "watch")
                 .filter(arguments::containsOption).toList();
             if (commands.isEmpty()) {
-                log.info("Database migrations are up to date. Use --ingest=YYYY-MM-DD, --process=YYYY-MM-DD, --output=YYYY-MM-DD, or --batch=YYYY-MM-DD.");
+                log.info("Database migrations are up to date. Use --ingest=YYYY-MM-DD, --process=YYYY-MM-DD, --output=YYYY-MM-DD, --batch=YYYY-MM-DD, or --watch.");
                 return;
             }
             if (commands.size() != 1)
-                throw new IllegalArgumentException("Use exactly one of --ingest, --process, --output, or --batch");
+                throw new IllegalArgumentException("Use exactly one of --ingest, --process, --output, --batch, or --watch");
             String command = commands.getFirst();
             var values = arguments.getOptionValues(command);
+            if (command.equals("watch")) {
+                if (values != null && !values.isEmpty()) throw new IllegalArgumentException("Use --watch without a value");
+                new TriggerMonitor(config).run();
+                return;
+            }
             if (values == null || values.size() != 1 || !values.getFirst().matches("[0-9]{4}-[0-9]{2}-[0-9]{2}"))
                 throw new IllegalArgumentException("Supply exactly one --" + command + "=YYYY-MM-DD");
             LocalDate date = LocalDate.parse(values.getFirst());

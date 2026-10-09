@@ -87,10 +87,15 @@ public final class BatchJobRunner {
             try {
                 var execution = launcher.run(job, new JobParametersBuilder()
                     .addString("batchDate", date.toString(), true).toJobParameters());
-                if (execution.getStatus() != BatchStatus.COMPLETED)
-                    throw new IllegalStateException("Batch job " + date + " ended " + execution.getStatus()
-                        + "; inspect core_batch execution history and correct the cause before retrying",
-                        execution.getAllFailureExceptions().stream().findFirst().orElse(null));
+                if (execution.getStatus() != BatchStatus.COMPLETED) {
+                    var failedSteps = execution.getStepExecutions().stream()
+                        .filter(step -> step.getStatus() != BatchStatus.COMPLETED)
+                        .map(step -> step.getStepName() + "=" + step.getStatus()).toList();
+                    var failure = new IllegalStateException("Batch job " + date + " ended " + execution.getStatus()
+                        + "; steps: " + failedSteps + "; inspect core_batch execution history before retrying");
+                    execution.getAllFailureExceptions().forEach(failure::addSuppressed);
+                    throw failure;
+                }
             } catch (JobInstanceAlreadyCompleteException completed) {
                 // Same business date identifies the same job, never a fresh timestamped run.
                 log.info("Batch job already completed: {}; use --output to regenerate a file", date);

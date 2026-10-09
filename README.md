@@ -4,7 +4,7 @@ A Java banking batch and Apache Camel integration learning project.
 
 ## Status
 
-Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, atomic balance updates, dated balance snapshots, and balance-file generation are implemented. Spring Batch orchestrates all three stages through `--batch`. Trigger watching and Camel publication remain future work.
+Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, atomic balance updates, dated balance snapshots, and balance-file generation are implemented. Spring Batch orchestrates all three stages through `--batch`. Trigger monitoring is available through `--watch`; Camel publication remains future work.
 
 See [the design document](docs/banking-core-design.md) for agreed requirements and open decisions.
 
@@ -38,8 +38,10 @@ With `docker/.env` configured as described above, run from the repository root:
 
 ```sh
 docker compose -f docker/compose.yaml build core
-# Apply migrations and exit (no batch command supplied).
-docker compose -f docker/compose.yaml run --rm core
+# Start the trigger monitor (and PostgreSQL).
+docker compose -f docker/compose.yaml up -d core
+# Stop monitoring before running manual stages.
+docker compose -f docker/compose.yaml stop core
 # Run each stage in order; stop if any command fails.
 docker compose -f docker/compose.yaml run --rm core --ingest=2026-10-09
 docker compose -f docker/compose.yaml run --rm core --process=2026-10-09
@@ -53,12 +55,12 @@ are mounted at `/data/input`, `/data/output`, and `/data/error`. On Linux, ensur
 these host directories permit the container UID 10001 to read inputs and write
 outputs/errors, or use `docker compose run --user "$(id -u):$(id -g)" --rm core ...`.
 
-Core is an on-demand service in the `batch` profile: ordinary `compose up -d`
-starts PostgreSQL only, while explicitly targeting `core` with `run` activates it.
-Each invocation exits on completion; no trigger watcher or automatic restart is
-configured. A failed output command can be retried independently without ingesting
-or processing again. Tests remain separate development commands using the disposable
-test database; they are not run during this image build.
+Core defaults to `--watch` in Compose and starts with ordinary `compose up -d`.
+It remains running until stopped or a trigger fails. Automatic restart is disabled
+so a bad batch does not cause a restart loop. Explicit commands passed to
+`compose run --rm core --batch=...` override the watcher command. Stop the monitor
+before manual batch/stage commands. Tests remain separate development commands
+using the disposable database and are not packaged in the image.
 
 ## Run and test the core
 
@@ -101,7 +103,7 @@ relationship_20261009.dat, and transaction_20261009.dat in data/input.
 Override the directory with `--corebank.input-directory=/path/to/input`.
 All four files must exist; empty files are accepted. Publish complete files before
 running and do not modify them during ingestion. The command exits after loading.
-Liquibase runs automatically before ingestion. Running without `--ingest`, `--process`, `--output`, or `--batch` connects
+Liquibase runs automatically before ingestion. Running without `--ingest`, `--process`, `--output`, `--batch`, or `--watch` connects
 to PostgreSQL, applies pending migrations, and exits without loading files.
 See [database migration setup](postgres/README.md#liquibase-migrations).
 
@@ -113,7 +115,60 @@ JDBC inserts execute in groups of 500 within one transaction.
 Duplicate business keys are retained for processing validation, not silently overwritten.
 This command only stages data. The separate --process command validates cross-record
 references, updates core tables, posts balances, and saves output snapshots. The --output
-command writes balance files. Trigger-file watching and Camel publication remain future steps.
+command writes balance files. Use `--watch` for trigger monitoring. Camel publication remains future work.
+
+### Monitor trigger files
+
+```sh
+jbang corebank/src/Core.java --watch
+# Or start the rebuilt core service in the background:
+docker compose -f docker/compose.yaml up -d --build core
+docker compose -f docker/compose.yaml logs -f core
+```
+
+The monitor scans immediately at startup and polls every second. It picks the
+oldest ready filename, runs one batch at a time, then scans again. Publish all four
+complete `.dat` files before publishing the empty ready trigger last. The trigger
+is the readiness signal: missing input files immediately produce an error, with no
+waiting for files to arrive. All four files are required for monitored retries too;
+manual `--batch`/`--output` retain their existing recovery behavior.
+
+| State | File |
+| --- | --- |
+| Ready | `data/input/batch_20260101.trg` |
+| Running | `data/input/batch_20260101.INPROGRESS.trg` |
+| Finished, including balance export | `data/output/batch_20260101.COMPLETE.trg` |
+| Handled failure | `data/error/batch_20260101.ERROR.trg` |
+
+The ready file is atomically renamed to INPROGRESS before validation or execution.
+COMPLETE preserves the trigger contents; ERROR contains the timestamp, phase, and
+exception details, including failed job steps and nested/suppressed exceptions.
+Terminal files are published using a temporary file in the destination directory,
+then INPROGRESS is removed, supporting separate input/output/error mounts. A crash
+between these operations may leave both markers. Only exact ready names are
+consumed; temporary files and terminal marker names are ignored.
+
+On any handled failure the monitor finalizes ERROR and exits nonzero. Later ready
+triggers remain untouched. An earlier ERROR blocks later dates across restarts.
+Correct the files/problem, create a new ready trigger for the failed date, then
+restart the core service. A successful retry archives the old ERROR under
+`data/error/archive/`; repeated failures also preserve earlier diagnostics there.
+Original `.dat` files are retained. Identical duplicate COMPLETE markers are accepted;
+conflicting ones are preserved and cause an error.
+
+A database advisory lock permits only one monitor per database. Existing
+INPROGRESS files cause startup scanning to stop for investigation. Ordinary failures
+must produce ERROR, but forced termination, JVM failure, or inability to write the
+error directory/remove the source can leave INPROGRESS. Logs explicitly identify
+finalization failure. Shutdown allows an active batch up to 25 seconds to finish;
+forced termination may require reconciling Spring Batch and business states before
+retrying. Never simply rename an active trigger while its process is still running.
+
+Filesystem lifecycle tests (no database required):
+
+```sh
+jbang corebank/tests/TriggerMonitorTests.java
+```
 
 ### Run the complete batch job
 
@@ -158,8 +213,7 @@ committed business posting as failed. Retain job metadata with its business data
 
 Individual `--ingest`, `--process`, and `--output` commands remain available for
 manual diagnosis/recovery. They do not participate in the job-level ordering guard;
-do not run them concurrently with `--batch`. There is no trigger watcher or scheduler
-in this change. Choose exactly one command per invocation.
+do not run them concurrently with `--batch`. The `--watch` mode invokes this job from trigger files; no time-based scheduler is configured. Choose exactly one command per invocation.
 
 ### Batch orchestration integration tests
 
@@ -218,7 +272,7 @@ pending operator investigation; automatic crash recovery is not implemented. Ver
 the original process/connection has ended and inspect the attempt before marking
 an abandoned RUNNING row FAILED with completed_at and an explanatory error_message.
 A COMPLETED attempt must never be changed to FAILED. Retry after recovery.
-Trigger watching and Camel publication remain future work.
+Trigger monitoring is available through `--watch`; Camel publication remains future work.
 
 ### Export balance output
 

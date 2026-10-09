@@ -1,5 +1,7 @@
 package corebank.processing;
 
+import corebank.BatchLocks;
+
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.LocalDate;
@@ -8,7 +10,6 @@ import java.util.Map;
 
 /** Posts one ingested date atomically. Owns the supplied dedicated JDBC connection's transactions. */
 public final class BatchProcessor {
-    private static final int DATE_LOCK = 1129271877;
     private static final int PROCESS_LOCK = 1129271878;
 
     public Map<String, Long> process(Connection c, LocalDate date) throws SQLException {
@@ -21,7 +22,7 @@ public final class BatchProcessor {
             // Session locks survive the attempt's initial commit. All processors serialize;
             // ingestion shares the date lock, so its four tables cannot change underneath us.
             lock(c, PROCESS_LOCK, 0, true); globalLocked = true;
-            lock(c, DATE_LOCK, Math.toIntExact(date.toEpochDay()), true); dateLocked = true;
+            lock(c, BatchLocks.DATE_LOCK_NAMESPACE, BatchLocks.dateKey(date), true); dateLocked = true;
             try (var s = c.prepareStatement("SELECT status,customer_count,account_count,relationship_count,transaction_count FROM core.batch_run WHERE batch_date=? AND status IN ('RUNNING','COMPLETED')")) {
                 s.setObject(1, date);
                 try (var rs = s.executeQuery()) {
@@ -84,7 +85,7 @@ public final class BatchProcessor {
             // Callers use a dedicated connection and close it even if cleanup fails.
             try { if (!c.getAutoCommit()) { c.rollback(); c.setAutoCommit(true); } }
             finally {
-                try { if (dateLocked) lock(c, DATE_LOCK, Math.toIntExact(date.toEpochDay()), false); }
+                try { if (dateLocked) lock(c, BatchLocks.DATE_LOCK_NAMESPACE, BatchLocks.dateKey(date), false); }
                 finally { if (globalLocked) lock(c, PROCESS_LOCK, 0, false); }
             }
         }

@@ -1,5 +1,6 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21
+//SOURCES corebank/BatchLocks.java
 //DEPS org.postgresql:postgresql
 //DEPS org.liquibase:liquibase-core
 //DEPS org.springframework:spring-jdbc

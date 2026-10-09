@@ -1,5 +1,6 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21
+//SOURCES ../src/corebank/BatchLocks.java
 //DEPS org.springframework.boot:spring-boot-dependencies:3.4.4@pom
 //DEPS org.springframework.boot:spring-boot-starter
 //DEPS org.springframework.batch:spring-batch-infrastructure

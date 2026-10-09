@@ -2,6 +2,8 @@ package corebank.ingest;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import corebank.BatchLocks;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.time.LocalDate;
@@ -40,8 +42,8 @@ public final class BatchIngestor {
             // Serialize same-date replacement across application instances; lock ends with
             // transaction.
             try (var lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(?, ?)")) {
-                lock.setInt(1, 1129271877);
-                lock.setInt(2, Math.toIntExact(date.toEpochDay()));
+                lock.setInt(1, BatchLocks.DATE_LOCK_NAMESPACE);
+                lock.setInt(2, BatchLocks.dateKey(date));
                 lock.execute();
             }
             try (var status = connection.prepareStatement("SELECT status FROM core.batch_run WHERE batch_date=? AND status IN ('RUNNING','COMPLETED')")) {

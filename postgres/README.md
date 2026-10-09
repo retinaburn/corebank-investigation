@@ -63,6 +63,7 @@ The JBang launcher bundles postgres/changelog files as classpath resources:
 - 002-core-ingest.sql: the four staging tables.
 - 003-core-operational.sql: operational tables, audit triggers, and batch attempts.
 - 004-ingestion-receipt.sql: successful four-file ingestion receipts; old dates need re-ingestion.
+- 005-balance-output.sql: immutable dated balances and snapshot headers; existing completed dates are not backfilled.
 
 Liquibase stores history and checksums in public.databasechangelog, with a migration
 lock in public.databasechangeloglock. Every startup checks for pending changes;
@@ -96,6 +97,9 @@ zero balances atomically; transactions referencing any end-dated account are rej
 Transactions are immutable and reference a batch attempt with the same business date.
 See docs/banking-core-design.md, Operational schema, for lifecycle and posting rules.
 The migration creates structure only. The --process command implements staging-to-core
-validation, posting, balance updates, and batch-attempt tracking. The core_output schema
-exists, but its balance snapshot table and output generation remain pending; see the
-balance output contract in docs/banking-core-design.md.
+validation, posting, balance updates, batch-attempt tracking, and atomic output snapshots.
+Migration 005 adds core_output.batch_snapshot and core_output.balance. The --output
+command generates balance files from completed snapshots; it does not read live
+balances or post transactions. Dates completed before migration 005 cannot be
+exported because they have no historical snapshot. See the balance output contract
+in docs/banking-core-design.md.

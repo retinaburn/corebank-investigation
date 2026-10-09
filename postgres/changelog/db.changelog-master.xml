@@ -15,4 +15,7 @@
     <changeSet id="004-ingestion-receipt" author="corebank">
         <sqlFile path="004-ingestion-receipt.sql" relativeToChangelogFile="true"/>
     </changeSet>
+    <changeSet id="005-balance-output" author="corebank">
+        <sqlFile path="005-balance-output.sql" relativeToChangelogFile="true" splitStatements="false"/>
+    </changeSet>
 </databaseChangeLog>

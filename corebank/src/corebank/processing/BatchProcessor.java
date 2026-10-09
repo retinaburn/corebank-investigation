@@ -46,6 +46,12 @@ public final class BatchProcessor {
             }
             c.setAutoCommit(false);
             validate(c, date);
+            // Capture genuinely new IDs before reference upserts. Reference-only updates
+            // must not qualify existing accounts for output. The temporary table rolls
+            // back/drops with this transaction and never changes operational state.
+            try (var statement = c.prepareStatement("CREATE TEMP TABLE corebank_new_accounts ON COMMIT DROP AS SELECT account_id FROM core_ingest.account a WHERE batch_date=? AND NOT EXISTS (SELECT 1 FROM core.account old WHERE old.account_id=a.account_id)")) {
+                statement.setObject(1, date); statement.execute();
+            }
             var counts = new LinkedHashMap<String, Long>();
             counts.put("customer", upsert(c, date, "customer", "customer_id", "first_name,last_name,address_line1,city,province,postal_code,country"));
             counts.put("account", upsert(c, date, "account", "account_id", "start_date,end_date,account_type"));
@@ -62,6 +68,7 @@ public final class BatchProcessor {
                 s.setLong(1, run); s.executeUpdate();
             }
             reject(c, "SELECT 'Missing balance for transaction account' FROM core_ingest.transaction t LEFT JOIN core.balance b USING(account_id) WHERE t.batch_date=? AND b.account_id IS NULL LIMIT 1", date);
+            snapshot(c, date, run);
             counts.put("transaction", posted);
             try (var s = c.prepareStatement("UPDATE core.batch_run SET status='COMPLETED',completed_at=clock_timestamp(),customer_count=?,account_count=?,relationship_count=?,transaction_count=? WHERE batch_run_id=?")) {
                 int i = 1; for (long count : counts.values()) s.setLong(i++, count);
@@ -88,6 +95,20 @@ public final class BatchProcessor {
                 try { if (dateLocked) lock(c, BatchLocks.DATE_LOCK_NAMESPACE, BatchLocks.dateKey(date), false); }
                 finally { if (globalLocked) lock(c, PROCESS_LOCK, 0, false); }
             }
+        }
+    }
+
+    private static void snapshot(Connection c, LocalDate date, long run) throws SQLException {
+        String selected = "SELECT account_id FROM corebank_new_accounts UNION SELECT account_id FROM core.transaction WHERE batch_run_id=?";
+        long expected;
+        try (var s = c.prepareStatement("INSERT INTO core_output.batch_snapshot(batch_date,batch_run_id,record_count) SELECT ?,?,count(*) FROM (" + selected + ") accounts RETURNING record_count")) {
+            s.setObject(1, date); s.setLong(2, run); s.setLong(3, run);
+            try (var rs = s.executeQuery()) { rs.next(); expected = rs.getLong(1); }
+        }
+        try (var s = c.prepareStatement("INSERT INTO core_output.balance(batch_date,account_id,balance) SELECT ?,b.account_id,b.balance FROM core.balance b JOIN (" + selected + ") accounts USING(account_id)")) {
+            s.setObject(1, date); s.setLong(2, run);
+            if (s.executeLargeUpdate() != expected)
+                throw new SQLException("Missing balance for output account");
         }
     }
 

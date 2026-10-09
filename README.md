@@ -4,7 +4,7 @@ A Java banking batch and Apache Camel integration learning project.
 
 ## Status
 
-Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, and atomic balance updates are implemented.
+Java 21 / Spring Boot core launched with JBang, YAML configuration, banking records, and tested Spring Batch readers for all four input files. PostgreSQL staging ingestion is implemented for all four files. Operational tables, audit timestamps, account balance initialization, and batch-attempt tracking are defined through Liquibase. Business validation, reference-data upserts, immutable transaction posting, atomic balance updates, dated balance snapshots, and balance-file generation are implemented. Trigger watching and Camel publication remain future work.
 
 See [the design document](docs/banking-core-design.md) for agreed requirements and open decisions.
 
@@ -66,7 +66,7 @@ relationship_20261009.dat, and transaction_20261009.dat in data/input.
 Override the directory with `--corebank.input-directory=/path/to/input`.
 All four files must exist; empty files are accepted. Publish complete files before
 running and do not modify them during ingestion. The command exits after loading.
-Liquibase runs automatically before ingestion. Running without `--ingest` or `--process` connects
+Liquibase runs automatically before ingestion. Running without `--ingest`, `--process`, or `--output` connects
 to PostgreSQL, applies pending migrations, and exits without loading files.
 See [database migration setup](postgres/README.md#liquibase-migrations).
 
@@ -77,8 +77,8 @@ Same-date loads are serialized using a PostgreSQL transaction advisory lock.
 JDBC inserts execute in groups of 500 within one transaction.
 Duplicate business keys are retained for processing validation, not silently overwritten.
 This command only stages data. The separate --process command validates cross-record
-references, updates core tables, and posts balances. Trigger-file watching and output
-generation remain future steps.
+references, updates core tables, posts balances, and saves output snapshots. The --output
+command writes balance files. Trigger-file watching and Camel publication remain future steps.
 
 ### Process a staged batch
 
@@ -95,7 +95,7 @@ transactions, and adds credits/subtracts debits from balances in integer cents.
 New accounts receive their zero balance from the existing database trigger.
 Omitted reference records remain unchanged; negative balances are allowed.
 
-All operational changes and successful batch completion commit together. On an
+All operational changes, the dated balance snapshot, and successful batch completion commit together. On an
 error they roll back, and the attempt is recorded as FAILED with zero applied
 counts and a diagnostic. Correct the inputs, re-ingest, and retry a failed date.
 Duplicate business keys within a file fail the whole batch. Transaction IDs are
@@ -122,12 +122,22 @@ pending operator investigation; automatic crash recovery is not implemented. Ver
 the original process/connection has ended and inspect the attempt before marking
 an abandoned RUNNING row FAILED with completed_at and an explanatory error_message.
 A COMPLETED attempt must never be changed to FAILED. Retry after recovery.
-Trigger watching, output snapshots, and balance-file generation remain future work.
+Trigger watching and Camel publication remain future work.
 
-### Balance output — agreed, not yet implemented
+### Export balance output
 
-The next stage saves dated balances in `core_output.balance` and generates
-`balance_YYYYMMDD.dat`. Include new accounts even when their balance is zero and
+Processing saves dated balances in `core_output.balance`. Export a completed batch
+with a separate command:
+
+```sh
+jbang corebank/src/Core.java --output=2026-10-09
+```
+
+This writes `data/output/balance_20261009.dat`. Override the directory with
+`--corebank.output-directory=/path/to/output`. Use --ingest, --process, and --output
+separately, in that order; processing does not automatically write a file.
+
+Include new accounts even when their balance is zero and
 there are no transactions. Include existing accounts only when the batch posts
 new transactions, including zero-amount or net-zero activity. Skipped transaction
 replays and reference-only updates do not qualify an existing account for output.
@@ -138,7 +148,26 @@ both right-aligned and space-padded: 39 positions plus LF, UTF-8 without a BOM.
 Negative balances use a minus sign; zero and positive values have no sign. There
 are no headers, delimiters, or decimal points. See the
 [balance output contract](docs/banking-core-design.md#balance-output-contract--confirmed-2026-10-09).
-Snapshot creation and file generation are pending; there is no output command yet.
+
+Rows are sorted by account ID. An empty snapshot produces a zero-byte file.
+The exporter streams the saved snapshot to a temporary file in the output directory,
+then atomically publishes the final name. Filesystems without atomic moves fail
+without exposing a partial final file. An identical existing file is a no-op;
+a different existing file or a symlink is rejected and preserved. After reviewing
+and moving a conflicting file aside, retry --output. Concurrent application exports
+for the same date are serialized; external filesystem writers are not coordinated.
+
+File failures do not undo posting or change COMPLETED status. Retry --output to
+regenerate a missing file from the same historical snapshot, even after later dates
+have processed. Normal failures remove temporary files; a process crash can leave
+hidden `.balance_*.tmp` files, which are not completed output. Automatic cleanup of
+crash leftovers is not implemented.
+
+Migration 005 adds immutable snapshot rows and a header recording each snapshot's
+batch/run identity and row count, including zero-row snapshots. **Dates completed
+before migration 005 have no snapshot and cannot be exported.** They are not
+backfilled from live balances, and processing retries do not repost or recreate
+historical snapshots. Pending or failed batches also cannot be exported.
 
 ### Processing integration tests
 
@@ -148,9 +177,11 @@ With the disposable test database and COREBANK_TEST_DB_* variables below:
 jbang corebank/tests/ProcessingTests.java
 ```
 
-This launcher migrates the database and runs 13 tests, including concurrent posting,
-replays, upserts, invalid batches, failed retries, empty ingestion, and overflow.
-**It truncates all operational and staging tables; use only a disposable database.**
+This launcher migrates the database and runs 20 tests covering posting,
+replays, upserts, invalid batches, failed retries, empty ingestion, overflow, snapshot
+selection/rollback, historical output, exact formatting, file conflicts/recovery,
+legacy snapshot rejection, and concurrent exports.
+**It truncates all operational, output snapshot, and staging tables; use only a disposable database.**
 
 ### Database integration tests
 
@@ -246,7 +277,7 @@ may leave a subset of completed files that must be reviewed before retrying.
 
 ### Generator integration tests
 
-Against a **disposable database only** (these tests truncate operational and staging tables):
+Against a **disposable database only** (these tests truncate operational, output snapshot, and staging tables):
 
 ```sh
 COREBANK_TEST_DB_URL=jdbc:postgresql://localhost:55432/corebank_test \

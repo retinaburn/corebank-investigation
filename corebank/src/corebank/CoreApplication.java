@@ -10,6 +10,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import corebank.ingest.BatchIngestor;
 import corebank.processing.BatchProcessor;
+import corebank.output.BalanceExporter;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
@@ -25,13 +26,15 @@ public class CoreApplication {
         return args -> {
             log.info("Data directories: input={}, output={}, error={}",
                 config.inputDirectory(), config.outputDirectory(), config.errorDirectory());
-            if (!arguments.containsOption("ingest") && !arguments.containsOption("process")) {
-                log.info("Database migrations are up to date. Use --ingest=YYYY-MM-DD to stage files or --process=YYYY-MM-DD to post a staged batch.");
+            var commands = java.util.stream.Stream.of("ingest", "process", "output")
+                .filter(arguments::containsOption).toList();
+            if (commands.isEmpty()) {
+                log.info("Database migrations are up to date. Use --ingest=YYYY-MM-DD, --process=YYYY-MM-DD, or --output=YYYY-MM-DD.");
                 return;
             }
-            if (arguments.containsOption("ingest") && arguments.containsOption("process"))
-                throw new IllegalArgumentException("Use --ingest and --process separately");
-            String command = arguments.containsOption("ingest") ? "ingest" : "process";
+            if (commands.size() != 1)
+                throw new IllegalArgumentException("Use --ingest, --process, and --output separately");
+            String command = commands.getFirst();
             var values = arguments.getOptionValues(command);
             if (values == null || values.size() != 1 || !values.getFirst().matches("[0-9]{4}-[0-9]{2}-[0-9]{2}"))
                 throw new IllegalArgumentException("Supply exactly one --" + command + "=YYYY-MM-DD");
@@ -41,9 +44,12 @@ public class CoreApplication {
                 if (command.equals("ingest")) {
                     var counts = new BatchIngestor().ingest(connection, config.inputDirectory(), date);
                     log.info("Staged batch {}: {}", date, counts);
-                } else {
+                } else if (command.equals("process")) {
                     var counts = new BatchProcessor().process(connection, date);
                     log.info("Completed batch {} (stored applied counts; completed retries are no-ops): {}", date, counts);
+                } else {
+                    var file = new BalanceExporter().export(connection, config.outputDirectory(), date);
+                    log.info("Published balance output for {}: {}", date, file);
                 }
             }
         };

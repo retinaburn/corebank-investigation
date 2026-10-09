@@ -1,6 +1,6 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21
-//SOURCES ../src/corebank/BatchLocks.java
+//SOURCES ../src/corebank/BatchLocks.java ../src/corebank/output/BalanceExporter.java
 //DEPS org.springframework.boot:spring-boot-dependencies:3.4.4@pom
 //DEPS org.springframework.boot:spring-boot-starter
 //DEPS org.springframework.batch:spring-batch-infrastructure
@@ -17,6 +17,7 @@
 //FILES db/changelog/002-core-ingest.sql=../../postgres/changelog/002-core-ingest.sql
 //FILES db/changelog/003-core-operational.sql=../../postgres/changelog/003-core-operational.sql
 //FILES db/changelog/004-ingestion-receipt.sql=../../postgres/changelog/004-ingestion-receipt.sql
+//FILES db/changelog/005-balance-output.sql=../../postgres/changelog/005-balance-output.sql
 
 import org.junit.platform.console.ConsoleLauncher;
 import liquibase.integration.spring.SpringLiquibase;

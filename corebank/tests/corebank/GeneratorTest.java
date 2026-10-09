@@ -35,7 +35,7 @@ class GeneratorTest {
                 System.getenv("COREBANK_TEST_DB_PASSWORD"));
         try (var s = db.createStatement()) {
             s.execute(
-                    "TRUNCATE core.transaction,core.relationship,core.balance,core.account,core.customer,core.batch_run,core_ingest.customer,core_ingest.account,core_ingest.relationship,core_ingest.transaction");
+                    "TRUNCATE core_output.balance,core_output.batch_snapshot,core.transaction,core.relationship,core.balance,core.account,core.customer,core.batch_run,core_ingest.customer,core_ingest.account,core_ingest.relationship,core_ingest.transaction");
         }
     }
 

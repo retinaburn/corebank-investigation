@@ -1,6 +1,6 @@
 # Corebank Investigation — Design
 
-Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation and posting are implemented; trigger watching and output generation remain future work. Updated 2026-10-09.
+Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, posting, output snapshots, and balance-file generation are implemented; trigger watching and Camel publication remain future work. Updated 2026-10-09.
 
 ## Purpose and scope
 
@@ -144,7 +144,7 @@ batch_20261009.trg
 
 Planned trigger watching will start the core batch for that date when `batch_YYYYMMDD.trg` arrives in `input/`; it is not implemented yet. Empty trigger contents were suggested; the filename supplies the date.
 
-The intended core flow (steps 1–4 implemented; steps 5–6 pending):
+The implemented core flow (--ingest, then --process, then --output):
 
 1. Reads the matching data files into `core_ingest`.
 2. Validates the staged records.
@@ -157,7 +157,7 @@ The intended core flow (steps 1–4 implemented; steps 5–6 pending):
 
 The only requested business output is `balance_YYYYMMDD.dat`, containing exactly
 `accountid` and the final account `balance` in integer cents for the batch date.
-Output snapshots and file generation are not implemented yet.
+Processing commits output snapshots with the batch. The separate --output command generates the file from a completed snapshot.
 
 Include each qualifying account once:
 
@@ -178,10 +178,11 @@ positive balances have no sign. Do not write decimal points, thousands separator
 headers, or delimiters. The balance field accommodates the full signed Java long /
 PostgreSQL BIGINT range, including `-9223372036854775808`.
 
-The planned snapshot captures these selected accounts and their final balances by
-batch date. The proposed recovery design commits it with posting and generates the
-file from the saved snapshot, allowing file retries without reposting transactions
-or reading balances changed by later batches.
+The snapshot captures these selected accounts and their final balances by batch
+date, committing with posting and COMPLETED status. The exporter reads the saved
+snapshot, allowing file retries without reposting transactions or reading balances
+changed by later batches. Rows are ordered by account ID; an empty snapshot produces
+a zero-byte file.
 
 Customer, account, and relationship inputs are full-record updates; partial updates are not supported. Input files must have at most one record per business key per batch date. Future Camel staging must therefore upsert by batch date and business key before extraction. Distinct transactions remain distinct by `transactionid`, not by account ID. The relationship business key is (account_id, customer_id).
 
@@ -353,7 +354,7 @@ single changelog. Initial changesets create schemas and staging tables, adopting
 known existing objects using IF NOT EXISTS. History, checksums, and locks live in
 public.databasechangelog and public.databasechangeloglock and persist with the volume.
 New migrations are appended as new changesets; applied scripts must not be edited.
-Running the core without --ingest or --process connects to the database, migrates, and exits.
+Running the core without --ingest, --process, or --output connects to the database, migrates, and exits.
 Migration failure prevents ingestion. Liquibase handles migration transactions;
 BatchIngestor continues to explicitly manage its separate JDBC ingestion transaction.
 
@@ -393,7 +394,7 @@ and correction of completed dates remain future workflow decisions.
 
 This migration does not post staged records, update balances on transaction insert,
 or populate batch runs. BatchProcessor implements those actions in the application.
-core_output.balance snapshots remain future work; the confirmed output contract is described above.
+Migration 005 adds core_output.balance snapshots and batch_snapshot headers; the output contract is described above.
 
 ## Development data generator — implemented 2026-10-09
 
@@ -422,7 +423,7 @@ zero amounts are allowed. Numeric aggregation checks the final signed BIGINT bal
 without overflowing intermediate totals. The account trigger initializes balances.
 
 A committed RUNNING attempt precedes the operational transaction. All upserts,
-transaction inserts, balances, applied counts, and COMPLETED status commit together.
+transaction inserts, balances, output snapshots, applied counts, and COMPLETED status commit together.
 Errors roll back and mark the attempt FAILED separately. Failed counts stay zero.
 Completed-date retries return original counts without posting; completed dates
 cannot be re-ingested. Failed dates may be corrected/re-ingested/retried. Unprocessed
@@ -435,5 +436,45 @@ the ingestor's transaction-lock namespace and persists across attempt commits,
 preventing concurrent staging replacement. These locks require cooperating writers.
 Migration 004 records successful ingestion atomically, including all-empty batches.
 Pre-migration staging is preserved but must be re-ingested to receive a receipt.
-ProcessingTests.java runs 13 PostgreSQL integration tests against a disposable DB.
-Output snapshots/files and trigger watching remain separate future steps.
+ProcessingTests.java runs 20 PostgreSQL integration tests against a disposable DB,
+including snapshot and output coverage. Output snapshots commit with posting;
+file export is a separate command. Trigger watching remains a future step.
+
+
+## Balance snapshots and export — implemented 2026-10-09
+
+Migration 005 creates `core_output.batch_snapshot` (batch date, run ID, record count,
+creation timestamp) and `core_output.balance` (batch date, account ID, signed cents).
+The header distinguishes an empty completed snapshot from a missing historical
+snapshot. Update/delete triggers protect both tables against mutation.
+
+BatchProcessor captures newly created account IDs before upserts, combines them
+with accounts having transactions newly inserted for this run, and snapshots the
+final balances. Replayed transactions do not qualify existing accounts. Snapshot
+creation and the batch's operational changes roll back together on failure.
+Completed-date retries return stored counts without changing the original snapshot.
+
+`--output=YYYY-MM-DD` requires a completed batch with a snapshot. It streams sorted
+rows to a temporary file in the configured output directory, flushes it, and uses
+an atomic move to publish `balance_YYYYMMDD.dat`. Unsupported atomic moves fail;
+there is no non-atomic fallback. An identical existing regular file is a no-op;
+conflicting files and symlinks are preserved and rejected. Concurrent application
+exporters for a date use a database advisory lock across writing and publication.
+External filesystem writers are not coordinated by that lock.
+
+File failure leaves posting and COMPLETED status intact. Retry output independently;
+later processing cannot change the saved balances. Normal failures clean temporary
+files, but a process crash may leave hidden `.balance_*.tmp` files for operator
+cleanup. Final filenames alone identify completed output. This protocol does not
+provide broker delivery tracking or an end-to-end exactly-once guarantee.
+
+Previously completed batches have no snapshot: migration 005 deliberately does not
+infer historical balances or new-account membership. Export rejects those dates,
+and completed-date processing retries remain no-ops. No automatic backfill is
+provided. New empty batches do have a snapshot header and can export an empty file.
+
+The processing test suite covers account selection, net-zero and zero-amount
+activity, replay exclusion, snapshot rollback, stable historical regeneration,
+full signed-long formatting, empty output, missing/legacy snapshots, file failures
+and conflicts, immutability, and concurrent exports. Tests use a disposable database
+and truncate output tables along with operational and staging tables.

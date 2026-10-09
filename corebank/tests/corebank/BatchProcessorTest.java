@@ -21,7 +21,7 @@ class BatchProcessorTest {
     @BeforeEach void setup() throws Exception { db=connect(); clean(); }
     @AfterEach void close() throws Exception { if(db!=null) { clean(); db.close(); } }
     private void clean() throws SQLException {
-        sql("TRUNCATE core.transaction,core.relationship,core.balance,core.account,core.customer,core.batch_run,core_ingest.customer,core_ingest.account,core_ingest.relationship,core_ingest.transaction,core_ingest.batch_receipt");
+        sql("TRUNCATE core_output.balance,core_output.batch_snapshot,core.transaction,core.relationship,core.balance,core.account,core.customer,core.batch_run,core_ingest.customer,core_ingest.account,core_ingest.relationship,core_ingest.transaction,core_ingest.batch_receipt");
     }
     private void sql(String text) throws SQLException { try(var s=db.createStatement()) { s.execute(text); } }
     private String value(String text) throws SQLException {
@@ -160,4 +160,86 @@ class BatchProcessorTest {
         assertEquals("100",value("SELECT balance FROM core.balance"));
         assertEquals("1",value("SELECT count(*) FROM core.batch_run"));
     }
+    private Path output(LocalDate date) throws Exception {
+        return new corebank.output.BalanceExporter().export(db, input.resolve("output"), date);
+    }
+    @Test void snapshotSelectsNewAndActiveAccountsAndExcludesReplaysAndReferenceOnlyUpdates() throws Exception {
+        fixture(); account(day,3); tx(day,1,10,"CR",100); process(day);
+        assertEquals("2",value("SELECT record_count FROM core_output.batch_snapshot"));
+        assertEquals("0",value("SELECT balance FROM core_output.balance WHERE account_id=3"));
+        var next=day.plusDays(1); receipt(next); account(next,3); account(next,4);
+        tx(next,1,11,"CR",20); tx(next,2,12,"DR",20); process(next);
+        assertEquals("2,4",value("SELECT string_agg(account_id::text,',' ORDER BY account_id) FROM core_output.balance WHERE batch_date='"+next+"'"));
+        assertEquals("100",value("SELECT balance FROM core_output.balance WHERE batch_date='"+next+"' AND account_id=2"));
+        var third=next.plusDays(1);receipt(third);tx(third,1,10,"CR",100);process(third);
+        assertEquals("0",value("SELECT record_count FROM core_output.batch_snapshot WHERE batch_date='"+third+"'"));
+        var fourth=third.plusDays(1);receipt(fourth);tx(fourth,1,13,"CR",0);process(fourth);
+        assertEquals("1",value("SELECT record_count FROM core_output.batch_snapshot WHERE batch_date='"+fourth+"'"));
+    }
+    @Test void historicalOutputIsStableSortedAndIdempotent() throws Exception {
+        fixture();account(day,1);tx(day,1,10,"DR",50);process(day);
+        String expected="                  1                   0\n                  2                 -50\n";
+        Path file=output(day);assertEquals(expected,Files.readString(file));
+        var modified=Files.getLastModifiedTime(file);assertEquals(file,output(day));
+        assertEquals(modified,Files.getLastModifiedTime(file));
+        var next=day.plusDays(1);receipt(next);tx(next,1,11,"CR",200);process(next);
+        Files.delete(file);assertEquals(expected,Files.readString(output(day)));
+        assertEquals(2L,process(day).get("account"));
+        assertEquals("2",value("SELECT count(*) FROM core_output.balance WHERE batch_date='"+day+"'"));
+        assertEquals("150",value("SELECT balance FROM core.balance WHERE account_id=2"));
+    }
+    @Test void outputSupportsLongExtremesAndZeroByteEmptySnapshots() throws Exception {
+        fixture();account(day,Long.MAX_VALUE);tx(day,1,10,"DR",Long.MAX_VALUE);tx(day,2,11,"DR",1);
+        sql("INSERT INTO core_ingest.transaction VALUES ('"+day+"','t.dat',3,12,"+Long.MAX_VALUE+",'CR',"+Long.MAX_VALUE+")");
+        process(day);
+        String text=Files.readString(output(day));
+        assertEquals("                  2-9223372036854775808\n9223372036854775807 9223372036854775807\n",text);
+        for(String line:text.split("\n")) assertEquals(39,line.length());
+        var next=day.plusDays(1);receipt(next);process(next);assertEquals(0,Files.size(output(next)));
+    }
+    @Test void rejectsMissingFailedRunningAndLegacySnapshots() throws Exception {
+        assertThrows(SQLException.class,()->output(day));
+        sql("INSERT INTO core.batch_run(batch_date) VALUES ('"+day+"')");
+        assertThrows(SQLException.class,()->output(day));
+        sql("UPDATE core.batch_run SET status='FAILED',completed_at=clock_timestamp()");
+        assertThrows(SQLException.class,()->output(day));
+        sql("UPDATE core.batch_run SET status='COMPLETED'");
+        assertThrows(SQLException.class,()->output(day));
+        assertFalse(Files.exists(input.resolve("output")));assertTrue(db.getAutoCommit());
+    }
+    @Test void failedSnapshotRollsBackPostingAndRetrySucceeds() throws Exception {
+        fixture();tx(day,1,10,"CR",100);
+        sql("ALTER TABLE core_output.balance ADD CONSTRAINT output_test_failure CHECK(balance<0)");
+        try {
+            assertThrows(SQLException.class,()->process(day));
+            assertEquals("0",value("SELECT count(*) FROM core_output.batch_snapshot"));
+            assertEquals("0",value("SELECT count(*) FROM core.transaction"));
+            assertEquals("0",value("SELECT count(*) FROM core.account"));
+            assertEquals("FAILED",value("SELECT status FROM core.batch_run"));
+        } finally { sql("ALTER TABLE core_output.balance DROP CONSTRAINT output_test_failure"); }
+        process(day);assertTrue(Files.exists(output(day)));
+        assertThrows(SQLException.class,()->sql("UPDATE core_output.balance SET balance=1"));
+        assertThrows(SQLException.class,()->sql("DELETE FROM core_output.batch_snapshot"));
+    }
+    @Test void fileFailureCanRetryWithoutRepostingAndConflictingFileIsPreserved() throws Exception {
+        fixture();tx(day,1,10,"CR",100);process(day);
+        Path directory=input.resolve("output");Files.writeString(directory,"obstruction");
+        assertThrows(java.io.IOException.class,()->output(day));
+        assertEquals("COMPLETED",value("SELECT status FROM core.batch_run"));
+        Files.delete(directory);Path file=output(day);Files.writeString(file,"conflict");
+        assertThrows(java.io.IOException.class,()->output(day));assertEquals("conflict",Files.readString(file));
+        try(var files=Files.list(directory)) { assertEquals(1,files.count()); }
+        Files.delete(file);output(day);assertEquals("1",value("SELECT count(*) FROM core.transaction"));
+    }
+    @Test void concurrentExportsPublishOneCompleteFile() throws Exception {
+        fixture();tx(day,1,10,"CR",100);process(day);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var start=new CountDownLatch(1);
+            Callable<Path> action=()-> { start.await();try(var c=connect()) { return new corebank.output.BalanceExporter().export(c,input.resolve("output"),day); } };
+            var a=pool.submit(action);var b=pool.submit(action);start.countDown();
+            assertEquals(a.get(10,TimeUnit.SECONDS),b.get(10,TimeUnit.SECONDS));
+        }
+        assertEquals("                  2                 100\n",Files.readString(output(day)));
+    }
+
 }

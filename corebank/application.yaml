@@ -1,6 +1,13 @@
 spring:
   application:
     name: corebank
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.xml
+    url: ${corebank.database.url}
+    user: ${corebank.database.username}
+    password: ${corebank.database.password}
+    default-schema: public
+    liquibase-schema: public
   main:
     web-application-type: none
 
@@ -10,3 +17,7 @@ corebank:
   input-directory: ./data/input
   output-directory: ./data/output
   error-directory: ./data/error
+  database:
+    url: ${COREBANK_DB_URL:jdbc:postgresql://localhost:5432/corebank}
+    username: ${COREBANK_DB_USER:${POSTGRES_USERNAME:postgres}}
+    password: ${COREBANK_DB_PASSWORD:${POSTGRES_PASSWORD}}

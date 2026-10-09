@@ -1,6 +1,6 @@
 # Corebank Investigation — Design
 
-Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. Business tables and batch processing remain to be implemented. Updated 2026-10-09.
+Status: PostgreSQL Compose configuration, a Java 21 / Spring Boot 3.4.4 application launched with JBang, YAML configuration, and initial banking records are implemented. Spring Batch readers for all four input record types and a Unicode-aware tokenizer are implemented and tested. PostgreSQL staging tables and explicit command-line ingestion are implemented. Operational tables are implemented through Liquibase. Batch business validation, trigger watching, and posting remain to be implemented. Updated 2026-10-09.
 
 ## Purpose and scope
 
@@ -86,7 +86,7 @@ The ten-position first name, last name, city, and country fields remain delibera
 
 ## Input file readers — implemented
 
-- Spring Batch 5.2.2 (managed by the existing Spring Boot 3.4.4 BOM) supplies FlatFileItemReader. Only spring-batch-infrastructure is added at this stage; the Batch starter, job repository, and database-backed jobs are deferred.
+- Spring Batch 5.2.2 (managed by the existing Spring Boot 3.4.4 BOM) supplies FlatFileItemReader. The readers use spring-batch-infrastructure; the Batch starter, job repository, and database-backed jobs are deferred.
 - CodePointLineTokenizer normalizes NFC before checking exact record length and slicing by Unicode code point. It rejects control characters, BOMs, Unicode line/paragraph separators, and invalid surrogates.
 - CustomerFileReader.create(path) returns a new reader. The caller opens it with an ExecutionContext, reads until null, and closes it in a finally block. This reader is not yet wired into the startup runner or a batch job.
 - Customer widths in order: ID 19, firstName 10, lastName 10, addressLine1 20, city 10, province 2, postalCode 7, country 10. Total customer record width is 88 positions. The reader and tests now use the production width exclusively.
@@ -296,3 +296,78 @@ Deferred Camel decisions: topic names and message formats, upsert ordering, date
 - [Camel Pulsar component](https://camel.apache.org/components/4.14.x/pulsar-component.html)
 
 These links supported the design discussion; select and verify compatible versions when implementation starts.
+
+## Staging ingestion — implemented 2026-10-09
+
+`--ingest=YYYY-MM-DD` explicitly loads all four dated inputs through the existing
+readers into core_ingest using JDBC and the PostgreSQL driver managed by the Boot BOM.
+Liquibase applies postgres/changelog/db.changelog-master.xml on startup before ingestion. Database connection
+settings live under corebank.database with COREBANK_DB_URL, COREBANK_DB_USER,
+and COREBANK_DB_PASSWORD environment overrides.
+
+Working staging policy: require all four files, accept empty files, reject parsing
+errors, and atomically replace all rows for the requested date. Preserve prior rows
+on failure and serialize same-date loads through a transaction advisory lock.
+Rows retain source filename and line; business-key duplicates and unresolved
+references are preserved for the future validator. Staging identity is date plus
+source line within each record-type table, so relationship business-key policy
+remains open. Inserts are grouped in 500-row JDBC batches, with a single commit
+for all four files. Files must remain unchanged during the load.
+
+This is an explicit staging command, not yet a Spring Batch job or trigger watcher.
+It does not mark batches processed, post balances, or generate outputs. Same-date
+correction rules after operational posting remain unresolved. Six integration tests
+against PostgreSQL supplement the existing 62 reader tests.
+
+## Liquibase schema lifecycle — implemented 2026-10-09
+
+Spring Boot initializes Liquibase before command-line runners. The existing Boot BOM
+supplies Liquibase 4.29.2; JBang bundles the master XML and referenced SQL resources.
+The Docker initialization mount and manual migration workflow are replaced by this
+single changelog. Initial changesets create schemas and staging tables, adopting the
+known existing objects using IF NOT EXISTS. History, checksums, and locks live in
+public.databasechangelog and public.databasechangeloglock and persist with the volume.
+New migrations are appended as new changesets; applied scripts must not be edited.
+Running the core without --ingest now connects to the database, migrates, and exits.
+Migration failure prevents ingestion. Liquibase handles migration transactions;
+BatchIngestor continues to explicitly manage its separate JDBC ingestion transaction.
+
+## Operational schema — implemented 2026-10-09
+
+This section supersedes earlier open relationship-key and end-date decisions.
+Liquibase changeset 003 creates core.customer, core.account, core.relationship,
+core.transaction, core.balance, and core.batch_run. Types and field limits match
+staging. All tables have created_at and updated_at TIMESTAMPTZ processing timestamps;
+business dates remain DATE values. Update triggers preserve created_at and refresh
+updated_at. Immutable transactions retain their insertion timestamps.
+
+Relationships are keyed by (account_id, customer_id), with one PRIMARY or SECONDARY
+type per pair. Multiple primary customers per account are allowed; no exclusivity
+rule has been requested. Foreign keys do not cascade deletes. Account end dates
+must be on or after start dates.
+
+Any non-null account end_date prohibits new transactions, even when the end date
+is in the future or the supplied batch date precedes it. An insert trigger enforces
+this while holding a row lock that conflicts with concurrent account closure.
+Closing an account does not invalidate its historical transactions.
+
+Account insertion automatically creates a zero balance in the same transaction.
+A database trigger implements this because there is no account-creation service yet.
+The future application must not also insert the initial balance. Balances are signed
+BIGINT cents. Transactions use nonnegative BIGINT amounts and CR/DR direction.
+Transaction IDs are globally unique; updates/deletes are rejected. Corrections must
+use a new reversing transaction. A replay must compare existing contents before
+being treated as a no-op; conflict handling belongs to the future posting service.
+
+Each batch_run row represents an attempt with RUNNING, COMPLETED, or FAILED status,
+start/finish timestamps, four nonnegative record counts, and optional failure text.
+Counts describe successfully applied records, not raw staging rows. Failed attempts
+can be retried; only one RUNNING or COMPLETED attempt is allowed per business date.
+Transactions reference both the run ID and its matching business date. Future posting
+must create the attempt first, commit operational changes and successful completion
+together, and record failure after rolling back operational changes. Crash recovery
+and correction of completed dates remain future workflow decisions.
+
+This migration does not post staged records, update balances on transaction insert,
+or populate batch runs. Those actions require an atomic application posting flow.
+core_output.balance snapshots remain future work; their output format is still open.

@@ -1,4 +1,10 @@
 {
     "java.import.jbang.projectPerScript": true,
-    "java.compile.nullAnalysis.mode": "disabled"
+    "java.compile.nullAnalysis.mode": "disabled",
+    "terminal.integrated.env.osx": {
+        "POSTGRES_PASSWORD": "password",
+        "COREBANK_TEST_DB_URL" : "jdbc:postgresql://localhost:55432/corebank_test",
+        "COREBANK_TEST_DB_USER" : "postgres",
+        "COREBANK_TEST_DB_PASSWORD" : "test_only"
+    }
 }

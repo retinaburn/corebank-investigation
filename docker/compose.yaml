@@ -16,7 +16,6 @@ services:
     volumes:
       # PostgreSQL 18 uses a version-specific directory beneath this mount.
       - postgres_data:/var/lib/postgresql
-      - ../postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d corebank"]
       interval: 5s

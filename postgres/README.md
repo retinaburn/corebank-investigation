@@ -33,8 +33,64 @@ A Docker named volume preserves the database through container replacement and n
 
 PostgreSQL 18 stores its cluster beneath `/var/lib/postgresql/18/docker`; the volume is mounted at `/var/lib/postgresql` as required by the official image.
 
-On the first start with an empty volume, `init/001-schemas.sql` creates `core_ingest`, `core`, `core_output`, and `camel_ingest`. Initialization files do not run again against existing data. Later schema changes require migrations; editing an initialization file is not a migration. Changing the environment password likewise does not change an existing database password.
+The PostgreSQL image creates the database and login on an empty volume. The core
+application then uses Liquibase to create schemas and tables on startup. Docker no
+longer mounts application initialization SQL. Changing the environment password
+does not change an existing database password.
 
 UTF-8 database encoding and UTC timezone are configured. The application remains responsible for NFC normalization, field widths, and the topic-controlled business date. The readiness check tests whether PostgreSQL accepts connections; it does not validate application schemas or credentials.
 
 Upgrade the PostgreSQL major version only with an explicit database migration plan.
+
+## Liquibase migrations
+
+Set COREBANK_DB_PASSWORD to your database password and run from the repository root:
+
+```sh
+jbang corebank/src/Core.java
+```
+
+Optional overrides: COREBANK_DB_URL (default jdbc:postgresql://localhost:5432/corebank)
+and COREBANK_DB_USER (default postgres). JBang does not automatically read docker/.env.
+Add `--ingest=YYYY-MM-DD` to migrate first and then stage that date's files.
+A failed migration prevents the ingestion runner from starting.
+
+Spring Boot manages Liquibase 4.29.2 through its existing dependency BOM.
+The JBang launcher bundles postgres/changelog files as classpath resources:
+
+- db.changelog-master.xml: ordered changesets.
+- 001-schemas.sql: core_ingest, core, core_output, and camel_ingest.
+- 002-core-ingest.sql: the four staging tables.
+
+Liquibase stores history and checksums in public.databasechangelog, with a migration
+lock in public.databasechangeloglock. Every startup checks for pending changes;
+completed changesets are not rerun. Keep applied changesets and SQL files unchanged.
+For each future migration, add a new SQL file and a new changeset to the master XML,
+and bundle the SQL resource in both Core.java and IngestionTests.java using //FILES.
+Use Liquibase-managed transactions; do not put BEGIN/COMMIT in the SQL files.
+
+Fresh volumes get all changesets. Existing volumes retain both application data and
+migration history across container replacement. Deleting the database volume resets
+both; the next database/application startup rebuilds from the changelog.
+
+The first two changesets use IF NOT EXISTS to adopt the previous project setup without
+removing data or requiring a reset. This supports the known original schema; it does
+not reconcile manually altered existing table definitions. Future changes should use
+explicit migrations rather than silently ignoring conflicting objects.
+
+Migration transactions are separate from batch ingestion. BatchIngestor still manages
+its own JDBC transaction for the four-file delete-and-reload operation. There is no
+Spring @Transactional boundary around ingestion at this stage.
+
+The local default user remains postgres; dedicated application/migration roles remain
+future work. Staging rows are keyed by date and source line; business-key duplicates
+and unresolved references are retained for subsequent validation.
+
+## Operational tables
+
+Changeset 003 creates the six operational tables and database constraints/triggers.
+Run the normal core launcher to apply pending migrations. Account inserts create
+zero balances atomically; transactions referencing any end-dated account are rejected.
+Transactions are immutable and reference a batch attempt with the same business date.
+See docs/banking-core-design.md, Operational schema, for lifecycle and posting rules.
+The migration creates structure only; staging-to-core posting is not implemented.

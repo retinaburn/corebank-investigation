@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+    <preConditions onFail="HALT"><dbms type="postgresql"/></preConditions>
+    <changeSet id="001-schemas" author="corebank">
+        <sqlFile path="001-schemas.sql" relativeToChangelogFile="true"/>
+    </changeSet>
+    <changeSet id="002-core-ingest" author="corebank">
+        <sqlFile path="002-core-ingest.sql" relativeToChangelogFile="true"/>
+    </changeSet>
+    <changeSet id="003-core-operational" author="corebank">
+        <sqlFile path="003-core-operational.sql" relativeToChangelogFile="true" splitStatements="false"/>
+    </changeSet>
+</databaseChangeLog>

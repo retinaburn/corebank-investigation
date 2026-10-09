@@ -5,5 +5,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /** Core settings bound by Spring from application.yaml and external overrides. */
 @ConfigurationProperties(prefix = "corebank")
-public record Config(Path inputDirectory, Path outputDirectory, Path errorDirectory) {
+public record Config(Path inputDirectory, Path outputDirectory, Path errorDirectory, Database database) {
+    public record Database(String url, String username, String password) {}
 }

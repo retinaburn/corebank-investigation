@@ -1,5 +1,9 @@
 ///usr/bin/env jbang "$0" "$@" ; exit $?
 //JAVA 21
+//DEPS org.postgresql:postgresql
+//DEPS org.liquibase:liquibase-core
+//DEPS org.springframework:spring-jdbc
+//SOURCES corebank/ingest/BatchIngestor.java
 //SOURCES corebank/readers/RelationshipFileReader.java corebank/readers/TransactionFileReader.java
 //SOURCES corebank/readers/FileReaderSupport.java corebank/readers/AccountFileReader.java
 //DEPS org.springframework.boot:spring-boot-dependencies:3.4.4@pom
@@ -9,6 +13,10 @@
 //SOURCES corebank/CoreApplication.java corebank/Config.java corebank/BankingRecords.java
 //SOURCES corebank/readers/CodePointLineTokenizer.java corebank/readers/CustomerFileReader.java
 //FILES application.yaml=../application.yaml
+//FILES db/changelog/db.changelog-master.xml=../../postgres/changelog/db.changelog-master.xml
+//FILES db/changelog/001-schemas.sql=../../postgres/changelog/001-schemas.sql
+//FILES db/changelog/002-core-ingest.sql=../../postgres/changelog/002-core-ingest.sql
+//FILES db/changelog/003-core-operational.sql=../../postgres/changelog/003-core-operational.sql
 
 import corebank.CoreApplication;
 
